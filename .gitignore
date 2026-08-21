@@ -14,9 +14,14 @@
 
 # 覆盖率文件
 *.out
+coverage.html
 
 # Go workspace file
 go.work
+go.work.sum
+
+# Go 构建缓存（本机 ~/.cache/go-build 有权限问题时会指向这里）
+.go-cache/
 
 # IDE
 .idea/

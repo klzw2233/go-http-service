@@ -1,0 +1,49 @@
+# 换行符规范
+#
+# 背景：本项目在 Win10 与 Ubuntu 两台机器之间同步开发。
+# 若不做约束，Windows 侧写入的 CRLF 会让 Ubuntu 侧的 gofmt 把
+# 每一个 .go 文件都标记为「未格式化」，同时在 git diff 中产生
+# 大量纯空白的伪改动，污染每一次提交。
+#
+# 策略：仓库内一律以 LF 存储，检出到工作区时也一律使用 LF。
+# Go 工具链、VS Code 在 Windows 下都能正常处理 LF，无副作用。
+
+# 默认：由 Git 自动识别文本文件，统一使用 LF
+* text=auto eol=lf
+
+# Go 源码与模块文件（gofmt 强依赖 LF）
+*.go    text eol=lf
+go.mod  text eol=lf
+go.sum  text eol=lf
+
+# 文档与配置
+*.md    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.json  text eol=lf
+*.toml  text eol=lf
+
+# Shell 脚本必须是 LF，否则在 Linux 下会报 bad interpreter
+*.sh    text eol=lf
+
+# Windows 批处理脚本必须保持 CRLF，否则 cmd.exe 解析异常
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+
+# 二进制文件不做任何换行符转换
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary
+*.zip   binary
+*.gz    binary
+*.exe   binary
+*.dll   binary
+*.so    binary
+*.dylib binary
+
+# go.sum 是机器生成的校验和清单，在 diff 中折叠显示
+go.sum  linguist-generated=true
