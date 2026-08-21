@@ -22,6 +22,10 @@ const (
 	// ErrCodeMethodNotAllowed means the path exists but not for this
 	// HTTP method.
 	ErrCodeMethodNotAllowed ErrorCode = "METHOD_NOT_ALLOWED"
+
+	// ErrCodeInternal means the request failed for a reason the client
+	// cannot act on. Details go to the server log only.
+	ErrCodeInternal ErrorCode = "INTERNAL_ERROR"
 )
 
 // FieldError describes why one specific field was rejected. Field holds

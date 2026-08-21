@@ -160,7 +160,10 @@ go test -v ./internal/handler -run TestEchoHandler
 |--------|------------|---------|
 | `INVALID_JSON` | 400 | 请求体不是合法 JSON（语法错误、被截断） |
 | `VALIDATION_FAILED` | 400 | JSON 合法，但字段缺失、类型错误或超出约束 |
+| `NOT_FOUND` | 404 | 路径不存在 |
+| `METHOD_NOT_ALLOWED` | 405 | 路径存在，但不支持该 HTTP 方法（响应带 `Allow` 头） |
 | `PAYLOAD_TOO_LARGE` | 413 | 请求体超过 1 MiB 上限 |
+| `INTERNAL_ERROR` | 500 | 服务端异常，详情只写日志 |
 
 > 底层的原始错误（validator、`encoding/json` 的报错）只写入服务端日志，
 > **不会返回给客户端**。这些报错里含有 Go 内部结构体名（如 `EchoRequest`），
@@ -179,6 +182,23 @@ go test -v ./internal/handler -run TestEchoHandler
 
 - 默认监听端口：**8080**（可用 `PORT` 环境变量覆盖）
 - 基础路径：**/api**
+
+## 环境变量
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `PORT` | `8080` | 服务监听端口 |
+| `TRUSTED_PROXIES` | 空（谁都不信任） | 逗号分隔的可信代理 IP / CIDR 列表 |
+
+关于 `TRUSTED_PROXIES`：gin 默认信任**所有**代理，这会让 `c.ClientIP()`
+无条件采信客户端自己发来的 `X-Forwarded-For` 头，即客户端可以随意伪造自身 IP。
+本服务默认不信任任何代理，`ClientIP()` 取 TCP 连接的真实对端地址。
+
+只有当服务确实部署在反向代理（Nginx、负载均衡器）之后时，才需要设置：
+
+```bash
+TRUSTED_PROXIES="10.0.0.0/8,172.16.0.0/12" go run cmd/server/main.go
+```
 
 ## 服务器超时设置
 
