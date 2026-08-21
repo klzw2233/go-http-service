@@ -1,0 +1,27 @@
+# 编译产物
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# 二进制文件
+/go-http-service
+/server
+
+# 测试二进制文件
+*.test
+
+# 覆盖率文件
+*.out
+
+# Go workspace file
+go.work
+
+# IDE
+.idea/
+.vscode/
+
+# OS generated files
+.DS_Store
+Thumbs.db
