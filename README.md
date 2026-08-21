@@ -144,8 +144,22 @@ go test -v ./...
 只运行某个测试：
 
 ```bash
-go test -v ./internal/handler -run TestEchoHandler
+go test -v ./internal/handler -run TestEchoEndpoint
 ```
+
+查看覆盖率：
+
+```bash
+go test -cover ./...
+```
+
+竞态检测（测试中使用了 `t.Parallel`，建议提交前跑一次）：
+
+```bash
+go test -race ./...
+```
+
+当前覆盖率：`internal/model` 100%，`internal/handler` 82.9%。
 
 ---
 
