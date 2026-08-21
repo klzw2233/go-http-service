@@ -138,6 +138,43 @@ go test -v ./internal/handler -run TestEchoHandler
 
 ---
 
+## 错误响应契约
+
+所有接口的错误响应共用同一种结构，客户端只需实现一套解析逻辑：
+
+```json
+{
+  "code": "VALIDATION_FAILED",
+  "message": "one or more fields failed validation",
+  "fields": [
+    { "field": "message", "reason": "is required" }
+  ]
+}
+```
+
+- `code`：**稳定**的机器可读标识，客户端应基于它做分支判断
+- `message`：给人看的说明，措辞可能变化，不要用于逻辑判断
+- `fields`：仅在字段级校验失败时出现，`field` 是 JSON 字段名
+
+| `code` | HTTP 状态码 | 触发条件 |
+|--------|------------|---------|
+| `INVALID_JSON` | 400 | 请求体不是合法 JSON（语法错误、被截断） |
+| `VALIDATION_FAILED` | 400 | JSON 合法，但字段缺失、类型错误或超出约束 |
+| `PAYLOAD_TOO_LARGE` | 413 | 请求体超过 1 MiB 上限 |
+
+> 底层的原始错误（validator、`encoding/json` 的报错）只写入服务端日志，
+> **不会返回给客户端**。这些报错里含有 Go 内部结构体名（如 `EchoRequest`），
+> 且措辞会随依赖库版本变化，不适合作为对外契约。
+
+### 请求体限制
+
+| 限制 | 取值 | 说明 |
+|------|------|------|
+| 请求体总大小 | 1 MiB | 由 `limitBodySize` 中间件对全局路由生效 |
+| `/api/echo` 的 `message` 长度 | 4096 字符 | 由 binding tag `max=4096` 约束 |
+
+---
+
 ## 端口说明
 
 - 默认监听端口：**8080**（可用 `PORT` 环境变量覆盖）

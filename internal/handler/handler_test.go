@@ -65,5 +65,11 @@ func TestEchoHandler_BadRequest(t *testing.T) {
 	r.ServeHTTP(resp, req)
 
 	assert.Equal(t, http.StatusBadRequest, resp.Code)
-	assert.Contains(t, resp.Body.String(), "error")
+	assert.Contains(t, resp.Body.String(), `"code":"VALIDATION_FAILED"`)
+	assert.Contains(t, resp.Body.String(), `"field":"message"`)
+
+	// Regression guard for the type-name leak: validator used to render
+	// this error as "Key: 'EchoRequest.Message' Error:...", putting an
+	// internal Go type name on the wire.
+	assert.NotContains(t, resp.Body.String(), "EchoRequest")
 }
