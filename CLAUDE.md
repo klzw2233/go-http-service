@@ -50,11 +50,13 @@ curl -X POST http://localhost:8080/api/echo \
 
 ---
 
-## 三、已知环境问题：GOCACHE 权限
+## 三、GOCACHE 权限问题（已于 2026-08-22 修复）
 
-### 现象
+保留此节是为了记录成因，避免再次踩坑。**当前无需任何特殊处理**，直接用默认配置即可。
 
-不设置 `GOCACHE` 时，`go build` / `go vet` / `go test` 会报：
+### 曾经的现象
+
+不设置 `GOCACHE` 时，`go build` / `go vet` / `go test` 报：
 
 ```
 open /home/klzw2233/.cache/go-build/xx/xxxx-d: permission denied
@@ -62,32 +64,26 @@ open /home/klzw2233/.cache/go-build/xx/xxxx-d: permission denied
 
 ### 根因
 
-`~/.cache/go-build` 的属主是 **root:root**（创建于 2026-07-23），
-说明当时用 `sudo go ...` 执行过一次命令，缓存目录被 root 占据，
-之后普通用户就写不进去了。
+`~/.cache/go-build` 的属主变成了 **root:root**（创建于 2026-07-23），
+说明当时用 `sudo go ...` 执行过命令，缓存目录被 root 占据，普通用户随后写不进去。
 
-```bash
-$ ls -ld ~/.cache/go-build
-drwxr-xr-x 258 root root 4096  7月 23 22:50 /home/klzw2233/.cache/go-build
-```
-
-### 彻底修复（需要 Jimmy 手动执行，Claude 无法运行 sudo）
+### 修复方式
 
 ```bash
 sudo chown -R "$USER:$USER" ~/.cache/go-build
 ```
 
-执行后即可恢复默认行为，本节的绕法可以废弃。
+已执行并验证：属主恢复为 `klzw2233`，目录内无 root 残留，
+默认 `GOCACHE`（`~/.cache/go-build`）下 `go build`、`go vet`、
+`go test -race -cover ./...` 全部通过，`go clean -cache` 也能正常执行。
 
-### 临时绕法
+### 预防
 
-在项目内使用独立缓存目录（已加入 `.gitignore`）：
+> **不要用 `sudo` 运行任何 `go` 命令。** 这是问题的唯一成因。
+> Go 的构建、测试、模块下载都不需要 root 权限。
 
-```bash
-export GOCACHE=~/workspace/go-http-service/.go-cache
-```
-
-> **重要：不要用 `sudo` 运行任何 `go` 命令**，否则会再次制造同样的权限问题。
+`.gitignore` 里的 `.go-cache/` 规则保留作为保险，但项目内缓存目录已不再需要，
+也不必再手动 `export GOCACHE`。
 
 ---
 
