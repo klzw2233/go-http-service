@@ -8,7 +8,7 @@
 
 建立一个可用于后续项目演进的 Go 后端服务基础骨架：
 
-- 使用 Go 标准库 `net/http` 启动 HTTP 服务
+- 使用 [Gin](https://github.com/gin-gonic/gin) Web 框架启动 HTTP 服务
 - 提供健康检查接口
 - 为后续添加 REST API、数据库、中间件等能力打下基础
 
@@ -67,8 +67,7 @@ curl http://localhost:8080/api/health
 ## 下一步计划
 
 1. 添加更多基础 API（如 GET /api/info）
-2. 引入路由框架（Gin / chi / Echo）
-3. 添加中间件（日志、跨域、恢复）
-4. 连接 PostgreSQL 数据库
-5. 实现用户注册/登录接口
-6. 使用 Docker 容器化部署
+2. 添加中间件（日志、跨域、恢复）
+3. 连接 PostgreSQL 数据库
+4. 实现用户注册/登录接口
+5. 使用 Docker 容器化部署
