@@ -8,18 +8,14 @@ type HealthResponse struct {
 	Timestamp time.Time `json:"timestamp"`
 }
 
-// NewHealthResponse creates a new HealthResponse with the current UTC time.
-func NewHealthResponse() HealthResponse {
-	return HealthResponse{
-		Status:    "ok",
-		Timestamp: time.Now().UTC(),
-	}
-}
+// StatusOK is the Status value of a healthy service.
+const StatusOK = "ok"
 
-// InfoResponse represents the response body of /api/info.
-type InfoResponse struct {
-	Name      string    `json:"name"`
-	Version   string    `json:"version"`
-	GoVersion string    `json:"go_version"`
-	Timestamp time.Time `json:"timestamp"`
+// NewHealthResponse creates a HealthResponse stamped with the given time.
+// The caller supplies the time so tests can pin it.
+func NewHealthResponse(at time.Time) HealthResponse {
+	return HealthResponse{
+		Status:    StatusOK,
+		Timestamp: at,
+	}
 }

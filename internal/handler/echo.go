@@ -2,7 +2,6 @@ package handler
 
 import (
 	"net/http"
-	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -17,8 +16,5 @@ func EchoHandler(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, model.EchoResponse{
-		Message:  req.Message,
-		EchoedAt: time.Now().UTC(),
-	})
+	c.JSON(http.StatusOK, model.NewEchoResponse(req.Message, now()))
 }

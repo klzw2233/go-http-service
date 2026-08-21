@@ -21,16 +21,23 @@
 go-http-service/
 ├── cmd/
 │   └── server/
-│       └── main.go              # 服务入口，只负责启动
+│       └── main.go              # 服务入口：超时配置、信号监听、优雅关闭
 ├── internal/
 │   ├── handler/
-│   │   ├── health.go            # /api/health, /api/info handler
+│   │   ├── router.go            # 路由注册、代理信任、404/405/panic 处理
+│   │   ├── health.go            # /api/health handler
+│   │   ├── info.go              # /api/info handler
 │   │   ├── echo.go              # /api/echo handler
-│   │   └── router.go            # 路由注册
+│   │   ├── errors.go            # 绑定错误 -> 统一错误响应的翻译层
+│   │   ├── middleware.go        # 请求体大小限制中间件
+│   │   └── clock.go             # 可注入的时间源（便于测试）
 │   └── model/
-│       ├── health.go            # HealthResponse, InfoResponse
-│       └── echo.go              # EchoRequest, EchoResponse
+│       ├── health.go            # HealthResponse
+│       ├── info.go              # InfoResponse、服务名与版本号
+│       ├── echo.go              # EchoRequest, EchoResponse
+│       └── error.go             # ErrorResponse、错误码常量
 ├── notes/                       # 学习笔记
+├── .gitattributes               # 换行符规范（LF）
 ├── go.mod                       # Go 模块定义
 ├── go.sum                       # 依赖校验和
 └── README.md                    # 项目说明
@@ -108,7 +115,21 @@ curl -X POST http://localhost:8080/api/echo \
 
 ---
 
-### 4. 运行测试
+### 4. 构建二进制
+
+```bash
+go build -o server ./cmd/server
+```
+
+`/api/info` 返回的 `version` 字段默认是源码里的 `0.2.0`。发布构建时可以用
+`-ldflags -X` 在**编译期**注入真实版本，无需改动源码：
+
+```bash
+go build -ldflags "-X go-http-service/internal/model.Version=$(git describe --tags --always)" \
+  -o server ./cmd/server
+```
+
+### 5. 运行测试
 
 ```bash
 go test ./...
