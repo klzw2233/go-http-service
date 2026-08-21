@@ -43,7 +43,7 @@ go-http-service/
 ### 1. 进入项目目录
 
 ```bash
-cd "E:\Program Files\Claude Code\BackendEngineer\go-http-service"
+cd ~/workspace/go-http-service
 ```
 
 ### 2. 运行服务
@@ -51,6 +51,15 @@ cd "E:\Program Files\Claude Code\BackendEngineer\go-http-service"
 ```bash
 go run cmd/server/main.go
 ```
+
+默认监听 `8080`。需要换端口时通过 `PORT` 环境变量指定，无需重新编译：
+
+```bash
+PORT=9000 go run cmd/server/main.go
+```
+
+服务收到 `Ctrl+C`（SIGINT）或 `SIGTERM` 时会优雅关闭：停止接收新连接，
+等待在途请求处理完毕（最多 15 秒）后再退出。
 
 ### 3. 测试接口
 
@@ -131,8 +140,22 @@ go test -v ./internal/handler -run TestEchoHandler
 
 ## 端口说明
 
-- 服务监听端口：**8080**
+- 默认监听端口：**8080**（可用 `PORT` 环境变量覆盖）
 - 基础路径：**/api**
+
+## 服务器超时设置
+
+服务不使用 `gin.Engine.Run()`，而是显式构造 `http.Server` 以设置超时。
+`Run()` 内部创建的 server 四项超时全为零值（即永不超时），会留下
+Slowloris 攻击面。
+
+| 参数 | 取值 | 作用 |
+|------|------|------|
+| `ReadHeaderTimeout` | 5s | 限制客户端发送请求头的时长，防 Slowloris |
+| `ReadTimeout` | 10s | 限制读取完整请求（含 body）的时长 |
+| `WriteTimeout` | 10s | 限制写响应的时长 |
+| `IdleTimeout` | 60s | 限制 keep-alive 连接的空闲存活时长 |
+| 关闭排空上限 | 15s | 优雅关闭时等待在途请求的上限 |
 
 ---
 
