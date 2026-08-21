@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+# 同一分支上的新推送会取消尚未完成的旧运行，避免排队浪费额度
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: 格式 / 静态检查 / 测试
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Go
+        uses: actions/setup-go@v5
+        with:
+          # 以 go.mod 的 go 指令为唯一版本来源，避免此处与 go.mod 不一致
+          go-version-file: go.mod
+          cache: true
+
+      # 只要 .gitattributes 在，git 就会在 add 时把 CRLF 归一化，这一步不会
+      # 触发。它守的是「.gitattributes 被删除」这个回归：那种情况下 CRLF 会
+      # 直接入库，而 gofmt 会把每个文件都报成未格式化，错误信息具有误导性。
+      # 这一步先跑，好让报错直指真正的原因。
+      - name: 检查换行符
+        run: |
+          if crlf=$(git ls-files --eol -- '*.go' | grep 'i/crlf'); then
+            echo "以下 Go 文件以 CRLF 存入了仓库："
+            echo "$crlf"
+            echo "多半是 .gitattributes 丢失或失效，请先确认该文件存在"
+            exit 1
+          fi
+
+      - name: 检查 gofmt
+        run: |
+          if unformatted=$(gofmt -l cmd internal) && [ -n "$unformatted" ]; then
+            echo "以下文件未通过 gofmt："
+            echo "$unformatted"
+            echo "修复：gofmt -w cmd internal"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: 构建
+        run: go build ./...
+
+      # -race 是必要的：测试中使用了 t.Parallel 与共享的 testRouter
+      - name: 测试（含竞态检测与覆盖率）
+        run: go test -race -cover ./...
+
+      - name: 检查 go.mod / go.sum 是否已整理
+        run: |
+          go mod tidy
+          if ! git diff --exit-code go.mod go.sum; then
+            echo "go.mod 或 go.sum 未整理，请在本地运行 go mod tidy 后提交"
+            exit 1
+          fi
