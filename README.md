@@ -99,6 +99,26 @@ curl -X POST http://localhost:8080/api/echo \
 
 ---
 
+### 4. 运行测试
+
+```bash
+go test ./...
+```
+
+显示详细输出：
+
+```bash
+go test -v ./...
+```
+
+只运行某个测试：
+
+```bash
+go test -v ./internal/handler -run TestEchoHandler
+```
+
+---
+
 ## API 列表
 
 | 方法 | 路径 | 说明 |
@@ -118,7 +138,7 @@ curl -X POST http://localhost:8080/api/echo \
 
 ## 下一步计划
 
-1. 添加测试用例
-2. 连接 PostgreSQL 数据库
-3. 实现用户注册/登录接口
+1. 连接 PostgreSQL 数据库
+2. 实现用户注册/登录接口
+3. 添加中间件（日志、恢复、CORS）
 4. 使用 Docker 容器化部署
