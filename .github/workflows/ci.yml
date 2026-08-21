@@ -20,10 +20,10 @@ jobs:
 
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: 安装 Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           # 以 go.mod 的 go 指令为唯一版本来源，避免此处与 go.mod 不一致
           go-version-file: go.mod
