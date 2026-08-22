@@ -42,10 +42,34 @@ go test -race -cover ./...
 测试接口：
 
 ```bash
-curl http://localhost:8080/api/health
+curl http://localhost:8080/api/health   # 存活探针
+curl http://localhost:8080/api/ready    # 就绪探针（含依赖检查）
 curl http://localhost:8080/api/info
 curl -X POST http://localhost:8080/api/echo \
   -H "Content-Type: application/json" -d '{"message":"hello"}'
+```
+
+开发用数据库（独立容器，映射到 5433 避开宿主机的 PostgreSQL）：
+
+```bash
+# 首次创建
+docker run -d --name go-http-service-db \
+  -e POSTGRES_USER=app -e POSTGRES_PASSWORD=devsecret \
+  -e POSTGRES_DB=go_http_service \
+  -p 127.0.0.1:5433:5432 \
+  -v go-http-service-pgdata:/var/lib/postgresql/data \
+  --restart unless-stopped postgres:17
+
+docker start go-http-service-db     # 之后只需启停
+docker stop  go-http-service-db
+
+# 带数据库运行
+DATABASE_URL="postgres://app:devsecret@127.0.0.1:5433/go_http_service?sslmode=disable" \
+  go run cmd/server/main.go
+
+# 跑需要数据库的测试（不设置这个变量则相关测试自动跳过）
+export TEST_DATABASE_URL="postgres://app:devsecret@127.0.0.1:5433/go_http_service?sslmode=disable"
+go test -race -count=1 ./...
 ```
 
 ---
@@ -175,10 +199,20 @@ handler 内部用 `a.logFor(c)`，它返回带 `request_id` 的 logger，
 | `PORT` | `8080` | 服务监听端口 |
 | `TRUSTED_PROXIES` | 空（谁都不信任） | 逗号分隔的可信代理 IP / CIDR |
 | `REQUEST_TIMEOUT` | `8s` | 单请求处理超时，必须小于 `WRITE_TIMEOUT` |
+| `DATABASE_URL` | 空（不连库） | PostgreSQL 连接串，**目前可选** |
 | `LOG_LEVEL` / `LOG_FORMAT` | `info` / `json` | 日志级别与格式 |
 
 `TRUSTED_PROXIES` 留空时 `c.ClientIP()` 取 TCP 真实对端地址，客户端无法通过
 `X-Forwarded-For` 伪造自身 IP。只有确实部署在反向代理后面时才设置它。
+
+### 5.1 DSN 绝不能进日志
+
+`DATABASE_URL` 里带口令。`config.LogValue()` 会在**每次启动**时把配置写进日志，
+所以那里必须走 `redactDSN()`。新增任何含凭据的配置项时同理：
+在 `LogValue` 里脱敏，不要在调用处。
+
+`internal/db` 的 `ErrInvalidDSN` 也是同一个原因——pgx 的解析错误会带上原始连接串，
+而这个错误会被 `main` 写进日志，所以**不包装原错误**。
 
 ---
 
@@ -186,7 +220,8 @@ handler 内部用 `a.logFor(c)`，它返回带 `request_id` 的 logger，
 
 ```
 cmd/server/main.go          装配依赖、构造 logger、信号监听、优雅关闭
-internal/config/            所有环境变量的读取与校验
+internal/config/            所有环境变量的读取与校验、DSN 脱敏
+internal/db/                PostgreSQL 连接池与就绪探针
 internal/handler/           HTTP 层
   api.go                    API 结构体：依赖注入的载体
   router.go                 路由注册、中间件顺序、404/405/panic
@@ -234,29 +269,33 @@ handler panic 时异常会穿过 `requestLogger` 的 `c.Next()`，此时 Recover
 
 1. ~~引入路由框架（Gin / chi）~~ 已完成
 2. ~~接数据库前的地基：依赖注入、配置层、结构化日志、Request ID、请求超时、就绪探针~~ 已完成
-3. 添加 PostgreSQL 数据库连接
-4. 实现用户注册 / 登录 / JWT 认证
-5. 添加配置与错误处理模块的补充
-6. 使用 Docker 容器化部署
-7. 尝试 Kubernetes 部署
+3. ~~接 PostgreSQL 步骤 A：连接池 + 就绪探针接上真实数据库~~ 已完成
+4. 接 PostgreSQL 步骤 B：迁移机制 + `users` 表 + 注册接口
+5. 接 PostgreSQL 步骤 C：登录 + JWT 认证
+6. 补充中间件：CORS、限流、安全响应头
+7. 使用 Docker 容器化部署
+8. 尝试 Kubernetes 部署
 
-### 接 PostgreSQL 时具体要做什么
+### 步骤 B 要做什么
 
-地基已经就位，剩下三件事：
+步骤 A 只做了「连得上」，刻意不含任何业务逻辑，也**刻意没有引入迁移机制**——
+当时一张表都没有，引入就是没有迁移文件的空脚手架。
 
-1. **`internal/config`**：加 `DatabaseURL` 等字段，复用现有 env 助手
-2. **`internal/db/db.go`**：建连接池，返回 `*pgxpool.Pool`（或 `*sql.DB`）
-3. **`cmd/server/main.go`**：
-   ```go
-   pool, err := db.Connect(ctx, cfg)
-   if err != nil { return fmt.Errorf("database: %w", err) }
-   defer pool.Close()   // 必须写在 srv.Shutdown 之前，见 main.go 注释
+1. **迁移机制**：`goose` 或 `golang-migrate` + `embed.FS`，第一个迁移是 `users` 表
+2. **`internal/repository` / `internal/service`**：按 `notes/分层架构.md` 的四层结构新建，
+   Handler → Service → Repository，**不得反向依赖**
+3. **`POST /api/users`**：注册接口，密码用 bcrypt 或 argon2 哈希，绝不明文入库
+4. **`DATABASE_URL` 改为必需**：那时候服务真的离不开数据库了。
+   需要同步改 `config.validate()`，并给 e2e 测试配上数据库
 
-   api := handler.New(cfg, logger,
-       handler.WithReadyCheck("database", pool.Ping))
-   ```
-4. **`internal/repository` / `internal/service`**：按
-   `notes/分层架构.md` 的四层结构新建，Handler → Service → Repository，不得反向依赖
+写查询时记住 4.6：**`pool.Query` 必须接收 `c.Request.Context()`**，
+否则 `REQUEST_TIMEOUT` 对它无效。
 
-关闭顺序不能颠倒：**先排空 HTTP 请求，再关连接池**。
-反过来会切断正在执行的查询。`main.go` 的注释里写明了 defer 的书写位置为何如此。
+### 已经立好的规矩（步骤 B 直接沿用）
+
+- 关闭顺序：`defer pool.Close()` 注册在 `srv` 之前，实际执行是
+  「排空 HTTP 请求 → 关连接池」。反过来会切断正在执行的查询。
+  `cmd/server/e2e_test.go` 有断言守着这个顺序，别改坏它
+- 依赖检查：`handler.WithReadyCheck(name, fn)` 挂到 `/api/ready`，
+  检查函数必须尊重传入的 context
+- 检查失败只返回通用原因，原始错误只写日志（见 4.4）

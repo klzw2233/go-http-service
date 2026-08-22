@@ -43,8 +43,11 @@ go-http-service/
 │       └── e2e_test.go          # 端到端：编译并启动真实进程，走真实 TCP
 ├── internal/
 │   ├── config/
-│   │   ├── config.go            # 所有环境变量的读取与校验
+│   │   ├── config.go            # 所有环境变量的读取与校验、DSN 脱敏
 │   │   └── config_test.go
+│   ├── db/
+│   │   ├── db.go                # PostgreSQL 连接池与就绪探针
+│   │   └── db_test.go
 │   ├── handler/
 │   │   ├── api.go               # API 结构体：依赖注入的载体
 │   │   ├── router.go            # 路由注册、中间件顺序、404/405/panic
@@ -246,6 +249,63 @@ go test -short ./...
 > 注意：Go 会缓存测试结果。改了非测试代码后想看真实输出，加 `-count=1`
 > 强制重跑，否则可能看到的是上一次的缓存结果。
 
+#### 需要数据库的测试
+
+连接池、就绪探针、关闭顺序这些测试需要一个真实的 PostgreSQL。
+它们由 `TEST_DATABASE_URL` 控制：**未设置就自动跳过**，
+所以在没装数据库的机器上 `go test ./...` 依然全绿。
+
+```bash
+export TEST_DATABASE_URL="postgres://app:devsecret@127.0.0.1:5433/go_http_service?sslmode=disable"
+go test -race -count=1 ./...
+```
+
+CI 里配了 postgres service 容器并设置了这个变量，因此每次推送都会真正跑到这些路径。
+CI 还会**再跑一遍不带数据库的测试**，确保「本地无库也能开发」这件事不会悄悄退化。
+
+---
+
+## 开发用数据库
+
+用独立容器，不要用宿主机上可能已有的 PostgreSQL——学习阶段会频繁建表删表，
+和别的数据共用一个实例迟早出事。
+
+```bash
+docker run -d --name go-http-service-db \
+  -e POSTGRES_USER=app \
+  -e POSTGRES_PASSWORD=devsecret \
+  -e POSTGRES_DB=go_http_service \
+  -p 127.0.0.1:5433:5432 \
+  -v go-http-service-pgdata:/var/lib/postgresql/data \
+  --restart unless-stopped \
+  postgres:17
+```
+
+两个刻意的选择：
+
+- **映射到 `5433`**，避开宿主机 PostgreSQL 默认占用的 `5432`
+- **绑定 `127.0.0.1` 而非 `0.0.0.0`**，只有本机能连。开发库的口令通常很弱，
+  没有理由让它暴露在局域网里
+
+常用操作：
+
+```bash
+docker stop go-http-service-db      # 停（用来验证就绪探针会变 503）
+docker start go-http-service-db     # 起
+docker logs go-http-service-db      # 看日志
+psql "postgres://app:devsecret@127.0.0.1:5433/go_http_service"   # 连进去
+```
+
+连接服务：
+
+```bash
+DATABASE_URL="postgres://app:devsecret@127.0.0.1:5433/go_http_service?sslmode=disable" \
+  go run cmd/server/main.go
+```
+
+> 上面的口令仅供本机开发使用。它不会出现在日志里——启动日志中的 `database_url`
+> 是脱敏后的（见「日志」一节）。
+
 ---
 
 ## API 列表
@@ -276,7 +336,7 @@ go test -short ./...
 ```json
 {
   "status": "ready",
-  "timestamp": "2026-08-22T12:00:00Z",
+  "timestamp": "2026-08-23T12:00:00Z",
   "checks": [
     { "name": "database", "status": "ok", "duration_ms": 3 }
   ]
@@ -284,7 +344,18 @@ go test -short ./...
 ```
 
 任一检查失败时返回 **503**，`status` 变为 `not_ready`，对应检查的
-`status` 为 `failed`。当前尚未接入任何依赖，因此 `checks` 是空数组、恒返回 200。
+`status` 为 `failed`。未设置 `DATABASE_URL` 时不注册任何检查，
+`checks` 为空数组、恒返回 200。
+
+可以实地验证这套分级——停掉数据库，两个探针的反应完全不同：
+
+```bash
+docker stop go-http-service-db
+curl -o /dev/null -w '%{http_code}\n' localhost:8080/api/ready    # 503：摘流量
+curl -o /dev/null -w '%{http_code}\n' localhost:8080/api/health   # 200：不重启
+docker start go-http-service-db
+curl -o /dev/null -w '%{http_code}\n' localhost:8080/api/ready    # 恢复 200
+```
 
 > 检查失败时**不返回原始错误**，只返回 `check failed` / `check timed out` /
 > `check panicked` 三种通用原因。数据库驱动的错误里可能含有主机名、用户名甚至
@@ -366,7 +437,17 @@ server stopped with an error  error="config: PORT must be a number, got \"abc\""
 | `MAX_BODY_BYTES` | `1048576` | 请求体大小上限（1 MiB） |
 | `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 | `LOG_FORMAT` | `json` | `json` 或 `text` |
+| `DATABASE_URL` | 空（不连数据库） | PostgreSQL 连接串 |
+| `DB_MAX_CONNS` | `10` | 连接池上限 |
+| `DB_CONNECT_TIMEOUT` | `5s` | 建连超时，同时用作就绪探测的超时 |
 | `GIN_MODE` | 未设置时按 `release` 运行 | 由 gin 自身读取，见下 |
+
+关于 `DATABASE_URL`：**目前是可选的**。四个接口没有一个需要持久化，
+设成必需就是强制一个用不到的依赖。未设置时服务照常启动，只是不注册数据库就绪检查。
+等第一个依赖数据库的接口出现时会改为必需。
+
+`DB_MAX_CONNS` 显式固定连接池上限，而不是用 pgx 的默认值（`max(4, CPU 核数)`）——
+后者会让同一个服务换台机器部署就对数据库产生不同的压力。
 
 关于 `GIN_MODE`：gin 的 debug 模式会把路由表和警告**直接打到 stdout**，
 那些行不是 JSON，会混进结构化日志流让按行解析的采集器失败。因此本服务在
@@ -436,6 +517,14 @@ handler 的 deadline 永远没机会生效。配置校验会拒绝违反此约�
 > 这条记录是给人看的，十位数的整数没法一眼看出配置对不对。
 > 非时长字段保持原本类型，`max_body_bytes` 仍是数字，还能做数值比较。
 
+> **`database_url` 是脱敏后的**。这条记录每次启动都会写一遍并被日志系统长期留存，
+> 原样打印等于把数据库口令永久落盘。脱敏用标准库 `url.Redacted()`，
+> 把口令替换成 `xxxxx` 但保留主机、端口和库名——那才是这条日志的用处所在
+> （确认部署真的连到了预期的库）。
+>
+> 无法按 URL 解析的连接串（pgx 也接受 `host=... password=...` 这种形式）
+> 一律输出固定的 `(set)`，**绝不回退到打印原文**——解析失败恰恰是最容易漏出口令的情形。
+
 每个请求一条访问日志：
 
 ```json
@@ -473,32 +562,33 @@ X-Request-Id: x","level":"ERROR","msg":"payment approved
 
 ## 下一步计划
 
-接数据库前的地基已经完成（见 `notes/接入数据库前的地基.md`），
-接入 PostgreSQL 时只剩三件事：
+接数据库这件事拆成了三步，**步骤 A 已完成**。
 
-1. `internal/config` 加 `DatabaseURL` 等字段，复用现有的 env 读取助手
-2. 新建 `internal/db/db.go` 建连接池
-3. `cmd/server/main.go` 装配：
+| 步骤 | 内容 | 状态 |
+|------|------|------|
+| A | 连接池、就绪探针接上真实数据库、验证关闭顺序 | **已完成** |
+| B | 迁移机制 + `users` 表 + 注册接口 | 下一步 |
+| C | 登录 + JWT 认证中间件 | 待做 |
 
-```go
-pool, err := db.Connect(ctx, cfg)
-if err != nil {
-    return fmt.Errorf("database: %w", err)
-}
-defer pool.Close()   // 必须写在 srv.Shutdown 之前注册，否则会切断在执行的查询
+步骤 A 刻意不写任何业务逻辑。它的目的是**用一个真实依赖去验证地基**——
+`WithReadyCheck` 的扩展点、`defer pool.Close()` 的关闭顺序、context 的传播链，
+在此之前都只有测试验证过，没有被任何外部依赖真正接上去试过。
 
-api := handler.New(cfg, logger,
-    handler.WithReadyCheck("database", pool.Ping))   // 挂到 /api/ready
-```
+### 步骤 B 要做的
 
-然后按 `notes/分层架构.md` 建 `internal/repository` 和 `internal/service`，
-依赖方向 Handler → Service → Repository，不得反向。
+1. 引入迁移机制（`goose` 或 `golang-migrate` + `embed.FS`）——
+   步骤 A 刻意没做，因为当时一张表都没有，引入就是没有迁移文件的空脚手架
+2. 第一个迁移：`users` 表
+3. 按 `notes/分层架构.md` 建 `internal/repository` 和 `internal/service`，
+   依赖方向 Handler → Service → Repository，不得反向
+4. `POST /api/users` 注册接口，密码用 bcrypt 或 argon2 哈希
+5. 把 `DATABASE_URL` 从可选改为**必需**——那时候服务真的离不开数据库了
 
 ### 之后
 
-1. 实现用户注册 / 登录 / JWT 认证
+1. 登录 + JWT 认证
 2. 补充中间件：CORS、限流、安全响应头
-3. 使用 Docker 容器化部署
+3. 使用 Docker 容器化部署（`Dockerfile` + `docker-compose.yml`）
 4. 尝试 Kubernetes 部署（`/api/health` 与 `/api/ready` 已可直接对接探针）
 
 ---
