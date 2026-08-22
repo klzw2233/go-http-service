@@ -11,6 +11,8 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/gin-gonic/gin"
+
 	"go-http-service/internal/config"
 	"go-http-service/internal/handler"
 )
@@ -34,6 +36,15 @@ func run() error {
 
 	logger := newLogger(cfg, os.Stdout)
 	slog.SetDefault(logger)
+
+	// gin's debug mode prints its route table and warnings straight to
+	// stdout. Those lines are not JSON, so they interleave with the
+	// structured log stream and break any collector parsing it line by
+	// line. Release is the right default for a service; an explicit
+	// GIN_MODE still wins, and the handler tests set their own mode.
+	if os.Getenv("GIN_MODE") == "" {
+		gin.SetMode(gin.ReleaseMode)
+	}
 
 	// Dependencies are built here and released in reverse. The database
 	// pool slots in at this point:
