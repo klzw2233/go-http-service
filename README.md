@@ -757,6 +757,7 @@ X-Request-Id: x","level":"ERROR","msg":"payment approved
 
 | 笔记 | 内容 |
 |------|------|
+| `notes/接入 PostgreSQL 步骤B-注册接口与分层落地.md` | 本轮：手写迁移器、bcrypt 陷阱、TOCTOU、分层落地 |
 | `notes/接入 PostgreSQL 步骤A-连接池与就绪探针.md` | 连接池、探针实证、两处凭据泄露的堵法 |
 | `notes/接入数据库前的地基.md` | 依赖注入、配置层、日志、探针等六项改造 |
 | `notes/代码审查问题清单与改进计划.md` | 代码审查的 15 个问题与修复记录 |
