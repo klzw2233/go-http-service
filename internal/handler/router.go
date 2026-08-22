@@ -59,6 +59,7 @@ func SetupRouter(api *API) *gin.Engine {
 		group.GET("/ready", api.Ready)
 		group.GET("/info", api.Info)
 		group.POST("/echo", api.Echo)
+		group.POST("/users", api.CreateUser)
 	}
 
 	return r

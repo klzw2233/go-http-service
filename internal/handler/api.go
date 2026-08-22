@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"go-http-service/internal/config"
+	"go-http-service/internal/model"
+	"go-http-service/internal/service"
 )
 
 // API holds everything the HTTP handlers need.
@@ -24,7 +26,17 @@ type API struct {
 	// to save and restore global state.
 	now func() time.Time
 
+	// users implements account operations. Declared as an interface so
+	// the handler tests can drive it without a database, and so this
+	// package does not reach past the service layer.
+	users userRegistrar
+
 	readyChecks []readyCheck
+}
+
+// userRegistrar is the slice of the user service the handlers use.
+type userRegistrar interface {
+	Register(ctx context.Context, in service.RegisterInput) (*model.User, error)
 }
 
 // readyCheck is one dependency probed by the readiness endpoint.
@@ -53,6 +65,11 @@ func New(cfg *config.Config, log *slog.Logger, opts ...Option) *API {
 // WithClock replaces the time source. Intended for tests.
 func WithClock(fn func() time.Time) Option {
 	return func(a *API) { a.now = fn }
+}
+
+// WithUserService supplies the account operations behind POST /api/users.
+func WithUserService(users userRegistrar) Option {
+	return func(a *API) { a.users = users }
 }
 
 // WithReadyCheck registers a dependency probe for GET /api/ready.
