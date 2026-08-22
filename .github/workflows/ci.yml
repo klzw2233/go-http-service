@@ -73,6 +73,20 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # govulncheck 做的是调用图分析：只报告代码里**实际调用到**的有漏洞函数，
+      # 不像普通依赖扫描那样把整棵依赖树的 CVE 全倒出来，所以噪音很低、
+      # 报出来的基本都值得处理。
+      #
+      # 认证相关的依赖（JWT、bcrypt、数据库驱动）是漏洞影响最大的一类，
+      # 所以这一步在引入它们之前就加上。
+      #
+      # 用 @latest 而非固定版本：漏洞数据库是运行时拉取的，
+      # 但分析能力本身也在持续改进，扫描工具没有理由用旧的。
+      - name: 漏洞扫描
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
       - name: 构建
         run: go build ./...
 
