@@ -184,6 +184,44 @@ handler 内部用 `a.logFor(c)`，它返回带 `request_id` 的 logger，
 
 不要把查询串、请求体、凭据写进日志。
 
+### 4.8 分层：Handler → Service → Repository，错误也不例外
+
+依赖方向**严格单向**，不得反向，也不得跨层（Handler 不能直接调 Repository）。
+
+| 层 | 位置 | 不该知道 |
+|----|------|---------|
+| Handler | `internal/handler` | SQL |
+| Service | `internal/service` | gin、SQL |
+| Repository | `internal/repository` | HTTP、业务规则 |
+
+**错误值也遵守这个方向。** Repository 定义 `ErrUsernameTaken`，
+Service 定义自己的同名错误并做翻译，Handler 只匹配 Service 的——
+这样 handler 不需要 `import repository`。看着像重复，但那正是分层的代价与意义。
+
+Service 依赖的是接口而非具体类型（如 `userStore`），
+所以 service 的测试不需要数据库。
+
+### 4.9 唯一性靠数据库约束，不要先查后插
+
+```go
+// 错：TOCTOU 竞态，两个并发请求都能通过检查
+if exists, _ := repo.ExistsByUsername(name); exists { ... }
+repo.Create(user)
+
+// 对：直接插入，翻译 23505 唯一键冲突
+```
+
+`internal/repository/user_repository.go` 的 `translateCreateError` 按
+`pgErr.ConstraintName` 区分是用户名还是邮箱冲突。索引名定义在迁移文件里，
+**改索引名必须同步改这里**，否则精确的 409 会退化成 500。
+
+### 4.10 密码相关
+
+- bcrypt **只用前 72 字节**，超出静默截断。上限必须在 service 层按
+  **字节**（`len()`）校验——binding tag 按字符计，挡不住中文密码
+- 对外响应用 `model.UserResponse`，不要直接返回 `model.User`
+- 新增用户相关字段前先想清楚它能不能公开
+
 ---
 
 ## 五、环境变量
@@ -221,7 +259,11 @@ handler 内部用 `a.logFor(c)`，它返回带 `request_id` 的 logger，
 ```
 cmd/server/main.go          装配依赖、构造 logger、信号监听、优雅关闭
 internal/config/            所有环境变量的读取与校验、DSN 脱敏
-internal/db/                PostgreSQL 连接池与就绪探针
+internal/db/                PostgreSQL 连接池、就绪探针、手写迁移器
+  migrate.go                embed + advisory lock + 每迁移一事务
+  migrations/*.sql          迁移文件，按文件名顺序执行
+internal/repository/        数据访问层：Go 结构体 <-> SQL
+internal/service/           业务规则：bcrypt、校验、错误翻译
 internal/handler/           HTTP 层
   api.go                    API 结构体：依赖注入的载体
   router.go                 路由注册、中间件顺序、404/405/panic
@@ -270,32 +312,43 @@ handler panic 时异常会穿过 `requestLogger` 的 `c.Next()`，此时 Recover
 1. ~~引入路由框架（Gin / chi）~~ 已完成
 2. ~~接数据库前的地基：依赖注入、配置层、结构化日志、Request ID、请求超时、就绪探针~~ 已完成
 3. ~~接 PostgreSQL 步骤 A：连接池 + 就绪探针接上真实数据库~~ 已完成
-4. 接 PostgreSQL 步骤 B：迁移机制 + `users` 表 + 注册接口
+4. ~~接 PostgreSQL 步骤 B：迁移机制 + `users` 表 + 注册接口~~ 已完成
 5. 接 PostgreSQL 步骤 C：登录 + JWT 认证
 6. 补充中间件：CORS、限流、安全响应头
 7. 使用 Docker 容器化部署
 8. 尝试 Kubernetes 部署
 
-### 步骤 B 要做什么
+### 步骤 C 要做什么
 
-步骤 A 只做了「连得上」，刻意不含任何业务逻辑，也**刻意没有引入迁移机制**——
-当时一张表都没有，引入就是没有迁移文件的空脚手架。
+1. **`POST /api/auth/login`**：查用户、`bcrypt.CompareHashAndPassword` 比对、签发 JWT
+2. **JWT 密钥进 config**：必需项，且**必须在 `LogValue()` 里脱敏**，
+   和 `DATABASE_URL` 同等对待（见 5.1）
+3. **认证中间件**：解析 `Authorization: Bearer`，把用户 ID 注入 context。
+   注册顺序参考第六节，它应该在 timeout 之后、具体路由之前
+4. **`GET /api/auth/me`**：受保护接口的第一个例子
+5. **Repository 加 `FindByUsername`**：注意查询要写成
+   `WHERE lower(username) = lower($1)` 才能命中函数索引
 
-1. **迁移机制**：`goose` 或 `golang-migrate` + `embed.FS`，第一个迁移是 `users` 表
-2. **`internal/repository` / `internal/service`**：按 `notes/分层架构.md` 的四层结构新建，
-   Handler → Service → Repository，**不得反向依赖**
-3. **`POST /api/users`**：注册接口，密码用 bcrypt 或 argon2 哈希，绝不明文入库
-4. **`DATABASE_URL` 改为必需**：那时候服务真的离不开数据库了。
-   需要同步改 `config.validate()`，并给 e2e 测试配上数据库
+> 登录接口有两个容易忽略的安全点：
+>
+> 1. **用户不存在和密码错误必须返回完全相同的响应**，否则接口就成了用户名枚举器
+> 2. **两条路径的耗时也要接近**。用户不存在时直接返回会明显快于跑一次 bcrypt 比对，
+>    这个时间差足以被计时区分出来。做法是即使用户不存在也执行一次假的哈希比对
 
-写查询时记住 4.6：**`pool.Query` 必须接收 `c.Request.Context()`**，
-否则 `REQUEST_TIMEOUT` 对它无效。
+### 已经立好的规矩（步骤 C 直接沿用）
 
-### 已经立好的规矩（步骤 B 直接沿用）
-
-- 关闭顺序：`defer pool.Close()` 注册在 `srv` 之前，实际执行是
-  「排空 HTTP 请求 → 关连接池」。反过来会切断正在执行的查询。
-  `cmd/server/e2e_test.go` 有断言守着这个顺序，别改坏它
-- 依赖检查：`handler.WithReadyCheck(name, fn)` 挂到 `/api/ready`，
+- **关闭顺序**：`defer pool.Close()` 注册在 `srv` 之前，实际执行是
+  「排空 HTTP 请求 → 关连接池」。`cmd/server/e2e_test.go` 有断言守着，别改坏它
+- **迁移**：加一个 `internal/db/migrations/000N_*.sql` 即可，启动时自动执行。
+  改已提交的迁移文件是禁止的——已经跑过的环境不会重跑它
+- **依赖检查**：`handler.WithReadyCheck(name, fn)` 挂到 `/api/ready`，
   检查函数必须尊重传入的 context
-- 检查失败只返回通用原因，原始错误只写日志（见 4.4）
+- **错误分层**：Repository 错误 → Service 错误 → HTTP 状态码，逐层翻译（见 4.8）
+- **唯一性靠数据库约束**，不要先查后插（见 4.9）
+- 原始错误只写日志，对外只给稳定错误码（见 4.4）
+
+### 端到端测试需要数据库
+
+`DATABASE_URL` 现在是必需项，所以 `cmd/server` 的端到端测试整体需要
+`TEST_DATABASE_URL`，未设置就 skip。CI 里配了 postgres service 容器，
+并额外跑一遍不带数据库的测试，确保「本地无库也能跑单元测试」不退化。

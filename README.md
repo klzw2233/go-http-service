@@ -47,7 +47,16 @@ go-http-service/
 │   │   └── config_test.go
 │   ├── db/
 │   │   ├── db.go                # PostgreSQL 连接池与就绪探针
+│   │   ├── migrate.go           # 手写迁移器（embed + advisory lock）
+│   │   ├── migrations/          # SQL 迁移文件，按文件名顺序执行
+│   │   │   └── 0001_create_users.sql
 │   │   └── db_test.go
+│   ├── repository/
+│   │   ├── user_repository.go   # users 表读写、唯一键冲突翻译
+│   │   └── user_repository_test.go
+│   ├── service/
+│   │   ├── user_service.go      # 注册业务规则、bcrypt
+│   │   └── user_service_test.go
 │   ├── handler/
 │   │   ├── api.go               # API 结构体：依赖注入的载体
 │   │   ├── router.go            # 路由注册、中间件顺序、404/405/panic
@@ -55,6 +64,7 @@ go-http-service/
 │   │   ├── ready.go             # /api/ready    readiness（可挂依赖检查）
 │   │   ├── info.go              # /api/info
 │   │   ├── echo.go              # /api/echo
+│   │   ├── user.go              # /api/users    注册
 │   │   ├── errors.go            # 绑定错误 -> 统一错误响应的翻译层
 │   │   ├── requestid.go         # Request ID 生成、校验、context 传递
 │   │   ├── logging.go           # slog 访问日志中间件
@@ -179,6 +189,33 @@ curl -X POST http://localhost:8080/api/echo \
 
 ```json
 {"message":"hello","echoed_at":"..."}
+```
+
+#### 注册用户
+
+```bash
+curl -i -X POST http://localhost:8080/api/users \
+  -H "Content-Type: application/json" \
+  -d '{"username":"jimmy","email":"jimmy@example.com","password":"correct-horse"}'
+```
+
+预期返回 `201`：
+
+```json
+{
+  "id": 1,
+  "username": "jimmy",
+  "email": "jimmy@example.com",
+  "created_at": "2026-08-23T12:00:00Z"
+}
+```
+
+**响应里没有任何密码字段**，连 `password_hash` 也没有。见下文「密码处理」。
+
+重复注册（包括大小写不同的同名）返回 `409`：
+
+```json
+{"code":"CONFLICT","message":"that username is already taken"}
 ```
 
 ---
@@ -308,6 +345,122 @@ DATABASE_URL="postgres://app:devsecret@127.0.0.1:5433/go_http_service?sslmode=di
 
 ---
 
+## 数据库迁移
+
+迁移器是手写的（`internal/db/migrate.go`，约 80 行），不依赖 goose 或
+golang-migrate。原因是那两个库的 API 都建立在 `database/sql` 上，
+而本项目用 pgxpool 原生 API——引入它们就得额外开一条 `database/sql` 通道专供迁移。
+
+迁移文件放在 `internal/db/migrations/`，用 `go:embed` 打进二进制：
+**部署时不需要额外分发 SQL 文件**，也不可能出现「二进制更新了但迁移目录没更新」。
+
+```
+internal/db/migrations/
+└── 0001_create_users.sql
+```
+
+新增迁移就是加一个文件，前缀数字递增。**按文件名排序执行**，所以前缀要补零对齐。
+
+### 三个设计要点
+
+**每个迁移一个事务。** DDL 和 `schema_migrations` 的插入在同一事务里，
+要么都成功要么都回滚。PostgreSQL 支持事务性 DDL（`CREATE TABLE` 可回滚），
+这是 MySQL 做不到的，也是这个迁移器能写得这么简单的原因——
+数据库永远不会处于「以为迁移过了其实没有」的状态。
+
+**启动时自动执行，并用 advisory lock 串行化。** 多副本同时启动是编排系统下的常态，
+没有这把锁两个 Pod 会同时建同一张表，其中一个报 `relation already exists` 而崩溃。
+
+**没有 down 迁移。** 手写方案的取舍，也符合实际：生产环境里回滚一个已经
+`DROP COLUMN` 的迁移根本救不回数据，正确做法是写一个新的前向迁移。
+
+### users 表
+
+```sql
+CREATE UNIQUE INDEX users_username_key ON users (lower(username));
+CREATE UNIQUE INDEX users_email_key    ON users (lower(email));
+```
+
+唯一约束建在 `lower(username)` 上而不是 `username`：**`Jimmy` 和 `jimmy` 是同一个人**，
+但用户输入的大小写要保留下来用于显示。代价是查询必须写成
+`WHERE lower(username) = lower($1)` 才能命中索引。
+
+索引名会被 repository 层用来区分「用户名冲突」还是「邮箱冲突」，改名要同步改代码。
+
+---
+
+## 密码处理
+
+### 存的是 bcrypt 哈希，不是明文
+
+```bash
+psql "$DATABASE_URL" -c 'select username, left(password_hash, 7) from users;'
+#  username | left
+# ----------+---------
+#  jimmy    | $2a$10$
+```
+
+### 72 字节这个坑
+
+bcrypt **只使用密码的前 72 字节**，超出部分静默丢弃。也就是说，
+两个前 72 字节相同的密码会被判为同一个——用任意一个都能登录。
+
+麻烦在于这条限制**无法用 binding tag 表达**：gin 的 validator 对字符串用
+`utf8.RuneCountInString`，按**字符**计数。一个 72 个汉字的密码是 216 字节，
+能通过 `binding:"max=72"`，却会被 bcrypt 砍掉 144 字节。
+
+所以密码长度上限在 service 层按**字节**校验：
+
+```go
+if len(in.Password) > model.MaxPasswordBytes {   // len() 返回字节数
+    return nil, ErrPasswordTooLong
+}
+```
+
+`internal/service` 里有一个用 72 个汉字的测试专门钉住这个行为。
+
+### 响应绝不含密码材料
+
+两道防线：
+
+1. `model.User.PasswordHash` 带 `json:"-"`（标签级，改结构体时容易漏）
+2. handler 返回的是 `model.UserResponse`，**结构体里根本没有这个字段**（构造级）
+
+只靠第 1 条不够——struct tag 在重构中很容易丢，而丢了的后果是密码哈希上了公网。
+`internal/model` 和 `internal/handler` 各有一个测试断言响应里不出现哈希。
+
+---
+
+## 分层架构
+
+```
+HTTP Handler  →  Service  →  Repository  →  PostgreSQL
+```
+
+| 层 | 位置 | 职责 | 不该知道 |
+|----|------|------|---------|
+| Handler | `internal/handler` | 解析请求、映射错误到 HTTP | SQL |
+| Service | `internal/service` | 业务规则（哈希、校验） | gin、SQL |
+| Repository | `internal/repository` | Go 结构体 ↔ SQL | HTTP、业务规则 |
+
+**依赖方向单向，错误也是。** Repository 定义 `ErrUsernameTaken`，
+Service 把它翻译成自己的同名错误，Handler 只匹配 Service 的错误——
+这样 handler 不需要 import repository，依赖方向连错误值都不破例。
+
+### 唯一约束优先于查重
+
+注册时**不做「先查有没有重名，再插入」**。那是 TOCTOU 竞态：
+两个并发请求都能通过查重，然后都去插入，其中一个会拿到数据库的约束错误——
+而代码声称已经处理过这种情况了。
+
+正确做法是直接插入，捕获 PostgreSQL 的 `23505` 唯一键冲突并按
+`ConstraintName` 翻译。数据库在写入时原子地判定约束，没有窗口期。
+
+`internal/repository` 里有一个 8 并发注册同名的测试：**恰好 1 个成功，
+7 个拿到 `ErrUsernameTaken`**——不是 500。
+
+---
+
 ## API 列表
 
 | 方法 | 路径 | 说明 |
@@ -316,6 +469,7 @@ DATABASE_URL="postgres://app:devsecret@127.0.0.1:5433/go_http_service?sslmode=di
 | GET | `/api/ready` | 就绪探针（readiness） |
 | GET | `/api/info` | 返回服务元信息 |
 | POST | `/api/echo` | 接收 JSON 并回显 |
+| POST | `/api/users` | 注册用户 |
 
 ### health 与 ready 的区别
 
@@ -387,6 +541,7 @@ curl -o /dev/null -w '%{http_code}\n' localhost:8080/api/ready    # 恢复 200
 | `VALIDATION_FAILED` | 400 | JSON 合法，但字段缺失、类型错误或超出约束 |
 | `NOT_FOUND` | 404 | 路径不存在 |
 | `METHOD_NOT_ALLOWED` | 405 | 路径存在，但不支持该 HTTP 方法（响应带 `Allow` 头） |
+| `CONFLICT` | 409 | 与已有数据冲突，如注册了别人已占用的用户名 |
 | `PAYLOAD_TOO_LARGE` | 413 | 请求体超过 `MAX_BODY_BYTES` 上限 |
 | `INTERNAL_ERROR` | 500 | 服务端异常，详情只写日志 |
 
@@ -437,14 +592,14 @@ server stopped with an error  error="config: PORT must be a number, got \"abc\""
 | `MAX_BODY_BYTES` | `1048576` | 请求体大小上限（1 MiB） |
 | `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 | `LOG_FORMAT` | `json` | `json` 或 `text` |
-| `DATABASE_URL` | 空（不连数据库） | PostgreSQL 连接串 |
+| `DATABASE_URL` | **必需** | PostgreSQL 连接串 |
 | `DB_MAX_CONNS` | `10` | 连接池上限 |
 | `DB_CONNECT_TIMEOUT` | `5s` | 建连超时，同时用作就绪探测的超时 |
 | `GIN_MODE` | 未设置时按 `release` 运行 | 由 gin 自身读取，见下 |
 
-关于 `DATABASE_URL`：**目前是可选的**。四个接口没有一个需要持久化，
-设成必需就是强制一个用不到的依赖。未设置时服务照常启动，只是不注册数据库就绪检查。
-等第一个依赖数据库的接口出现时会改为必需。
+关于 `DATABASE_URL`：**现在是必需项**，未设置时进程拒绝启动。
+在只有 health / info / echo 三个接口的阶段它是可选的——那时没有任何接口需要持久化，
+设成必需等于强制一个用不到的依赖。加了 `POST /api/users` 之后就说不通了。
 
 `DB_MAX_CONNS` 显式固定连接池上限，而不是用 pgx 的默认值（`max(4, CPU 核数)`）——
 后者会让同一个服务换台机器部署就对数据库产生不同的压力。
@@ -562,34 +717,39 @@ X-Request-Id: x","level":"ERROR","msg":"payment approved
 
 ## 下一步计划
 
-接数据库这件事拆成了三步，**步骤 A 已完成**。
+接数据库这件事拆成了三步，**步骤 A、B 已完成**。
 
 | 步骤 | 内容 | 状态 |
 |------|------|------|
 | A | 连接池、就绪探针接上真实数据库、验证关闭顺序 | **已完成** |
-| B | 迁移机制 + `users` 表 + 注册接口 | 下一步 |
-| C | 登录 + JWT 认证中间件 | 待做 |
+| B | 迁移机制 + `users` 表 + 注册接口 | **已完成** |
+| C | 登录 + JWT 认证中间件 | 下一步 |
 
 步骤 A 刻意不写任何业务逻辑。它的目的是**用一个真实依赖去验证地基**——
 `WithReadyCheck` 的扩展点、`defer pool.Close()` 的关闭顺序、context 的传播链，
 在此之前都只有测试验证过，没有被任何外部依赖真正接上去试过。
 
-### 步骤 B 要做的
+步骤 B 是第一个**垂直切片**：从 HTTP 请求一路穿到 SQL，
+把 `internal/repository` 和 `internal/service` 两层立起来。
 
-1. 引入迁移机制（`goose` 或 `golang-migrate` + `embed.FS`）——
-   步骤 A 刻意没做，因为当时一张表都没有，引入就是没有迁移文件的空脚手架
-2. 第一个迁移：`users` 表
-3. 按 `notes/分层架构.md` 建 `internal/repository` 和 `internal/service`，
-   依赖方向 Handler → Service → Repository，不得反向
-4. `POST /api/users` 注册接口，密码用 bcrypt 或 argon2 哈希
-5. 把 `DATABASE_URL` 从可选改为**必需**——那时候服务真的离不开数据库了
+### 步骤 C 要做的
+
+1. `POST /api/auth/login`：查用户、`bcrypt.CompareHashAndPassword` 比对、签发 JWT
+2. JWT 密钥进 config（**必需项，且要脱敏**，和 `DATABASE_URL` 同样处理）
+3. 认证中间件：解析 `Authorization: Bearer`，把用户 ID 注入 context
+4. `GET /api/auth/me`：受保护接口的第一个例子
+5. Repository 加 `FindByUsername`，注意 `WHERE lower(username) = lower($1)`
+   才能命中函数索引
+
+登录接口有个容易忽略的点：**用户不存在和密码错误必须返回同样的响应**，
+否则接口就成了用户名枚举器。而且两条路径的**耗时也要接近**——
+用户不存在时直接返回会明显更快，能被计时区分出来。
 
 ### 之后
 
-1. 登录 + JWT 认证
-2. 补充中间件：CORS、限流、安全响应头
-3. 使用 Docker 容器化部署（`Dockerfile` + `docker-compose.yml`）
-4. 尝试 Kubernetes 部署（`/api/health` 与 `/api/ready` 已可直接对接探针）
+1. 补充中间件：CORS、限流、安全响应头
+2. 使用 Docker 容器化部署（`Dockerfile` + `docker-compose.yml`）
+3. 尝试 Kubernetes 部署（`/api/health` 与 `/api/ready` 已可直接对接探针）
 
 ---
 
@@ -597,9 +757,10 @@ X-Request-Id: x","level":"ERROR","msg":"payment approved
 
 | 笔记 | 内容 |
 |------|------|
-| `notes/接入 PostgreSQL 步骤A-连接池与就绪探针.md` | 本轮：连接池、探针实证、两处凭据泄露的堵法 |
-| `notes/接入数据库前的地基.md` | 上一轮六项改造的完整推导与取舍 |
+| `notes/接入 PostgreSQL 步骤A-连接池与就绪探针.md` | 连接池、探针实证、两处凭据泄露的堵法 |
+| `notes/接入数据库前的地基.md` | 依赖注入、配置层、日志、探针等六项改造 |
 | `notes/代码审查问题清单与改进计划.md` | 代码审查的 15 个问题与修复记录 |
 | `notes/分层架构.md` | 四层架构与依赖方向 |
+| `notes/实现用户注册登录接口.md` | 用户系统的整体设计与安全要点 |
 | `notes/连接 PostgreSQL 数据库.md` | 驱动选择、连接池、迁移工具 |
 | `notes/添加中间件.md` | 中间件原理与注册顺序 |
