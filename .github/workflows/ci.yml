@@ -18,6 +18,25 @@ jobs:
     name: 格式 / 静态检查 / 测试
     runs-on: ubuntu-latest
 
+    # 数据库相关测试由 TEST_DATABASE_URL 控制：未设置就 skip。
+    # 本地没有 PostgreSQL 时 go test ./... 依然全绿，而 CI 有库，
+    # 所以连接池、就绪探针、关闭顺序这些路径每次推送都会真正跑到。
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: go_http_service
+        ports:
+          - 5432:5432
+        # 没有这个 healthcheck，测试会在数据库初始化完成前就开始连
+        options: >-
+          --health-cmd "pg_isready -U app -d go_http_service"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - name: 检出代码
         uses: actions/checkout@v7
@@ -59,7 +78,13 @@ jobs:
 
       # -race 是必要的：测试中使用了 t.Parallel 与共享的 testRouter
       - name: 测试（含竞态检测与覆盖率）
+        env:
+          TEST_DATABASE_URL: postgres://app:ci@127.0.0.1:5432/go_http_service?sslmode=disable
         run: go test -race -cover ./...
+
+      # 无数据库时必须同样全绿，否则等于强制所有人本地装 PostgreSQL 才能跑测试
+      - name: 测试（不带数据库）
+        run: go test -count=1 ./...
 
       - name: 检查 go.mod / go.sum 是否已整理
         run: |
