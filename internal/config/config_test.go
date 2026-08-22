@@ -22,6 +22,8 @@ var envVars = []string{
 	"SHUTDOWN_TIMEOUT", "REQUEST_TIMEOUT",
 	"MAX_BODY_BYTES", "LOG_LEVEL", "LOG_FORMAT",
 	"DATABASE_URL", "DB_MAX_CONNS", "DB_CONNECT_TIMEOUT",
+	"RATE_LIMIT_RPS", "RATE_LIMIT_BURST",
+	"LOGIN_RATE_LIMIT_RPM", "LOGIN_RATE_LIMIT_BURST",
 }
 
 // testDSN is a syntactically valid connection string. It is seeded by
@@ -68,6 +70,10 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, testDSN, cfg.DatabaseURL, "DATABASE_URL 现在是必需项，由 setEnv 注入")
 	assert.Equal(t, DefaultDBMaxConns, cfg.DBMaxConns)
 	assert.Equal(t, DefaultDBConnectTimeout, cfg.DBConnectTimeout)
+	assert.Equal(t, DefaultRateLimitRPS, cfg.RateLimitRPS)
+	assert.Equal(t, DefaultRateLimitBurst, cfg.RateLimitBurst)
+	assert.Equal(t, DefaultLoginRateLimitRPM, cfg.LoginRateLimitRPM)
+	assert.Equal(t, DefaultLoginRateLimitBurst, cfg.LoginRateLimitBurst)
 }
 
 func TestLoad_Overrides(t *testing.T) {
@@ -210,6 +216,18 @@ func TestLoad_InvalidValues(t *testing.T) {
 			name:    "缺少数据库连接串",
 			env:     map[string]string{"DATABASE_URL": ""},
 			wantErr: "DATABASE_URL is required",
+		},
+		{
+			// A non-positive budget locks every caller out rather than
+			// slowing abusers down, which is never what was meant.
+			name:    "全局限流为零",
+			env:     map[string]string{"RATE_LIMIT_RPS": "0"},
+			wantErr: "RATE_LIMIT_RPS must be positive",
+		},
+		{
+			name:    "登录限流为负",
+			env:     map[string]string{"LOGIN_RATE_LIMIT_RPM": "-1"},
+			wantErr: "LOGIN_RATE_LIMIT_RPM must be positive",
 		},
 	}
 

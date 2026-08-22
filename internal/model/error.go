@@ -27,6 +27,15 @@ const (
 	// such as registering a username somebody already holds.
 	ErrCodeConflict ErrorCode = "CONFLICT"
 
+	// ErrCodeUnauthorized means the request carried no usable
+	// credentials. It deliberately does not distinguish a missing token
+	// from an expired or forged one: telling a caller which of those
+	// applies tells an attacker how close they are.
+	ErrCodeUnauthorized ErrorCode = "UNAUTHORIZED"
+
+	// ErrCodeRateLimited means the caller exceeded its request budget.
+	ErrCodeRateLimited ErrorCode = "RATE_LIMITED"
+
 	// ErrCodeInternal means the request failed for a reason the client
 	// cannot act on. Details go to the server log only.
 	ErrCodeInternal ErrorCode = "INTERNAL_ERROR"

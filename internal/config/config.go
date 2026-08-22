@@ -50,6 +50,16 @@ const (
 	// reused as the readiness probe's timeout.
 	DefaultDBConnectTimeout = 5 * time.Second
 
+	// Generous enough that ordinary use never notices, tight enough to
+	// blunt a scripted flood.
+	DefaultRateLimitRPS   int64 = 20
+	DefaultRateLimitBurst int64 = 40
+
+	// Deliberately severe. A human logs in a handful of times a day; a
+	// password-guessing script wants thousands.
+	DefaultLoginRateLimitRPM   int64 = 5
+	DefaultLoginRateLimitBurst int64 = 5
+
 	DefaultLogLevel  = slog.LevelInfo
 	DefaultLogFormat = FormatJSON
 )
@@ -99,6 +109,20 @@ type Config struct {
 	// DBConnectTimeout bounds establishing a connection, and doubles as
 	// the readiness probe timeout. Env: DB_CONNECT_TIMEOUT.
 	DBConnectTimeout time.Duration
+
+	// RateLimitRPS and RateLimitBurst bound requests from one client
+	// address across most endpoints. The probes are exempt; see
+	// SetupRouter. Env: RATE_LIMIT_RPS, RATE_LIMIT_BURST.
+	RateLimitRPS   int64
+	RateLimitBurst int64
+
+	// LoginRateLimitRPM and LoginRateLimitBurst apply the much tighter
+	// budget the login endpoint needs. Measured per minute rather than
+	// per second because the useful values are single digits: an
+	// unlimited password check is an online brute-force target.
+	// Env: LOGIN_RATE_LIMIT_RPM, LOGIN_RATE_LIMIT_BURST.
+	LoginRateLimitRPM   int64
+	LoginRateLimitBurst int64
 
 	// LogLevel is the minimum level to emit. Env: LOG_LEVEL.
 	LogLevel slog.Level
@@ -150,6 +174,15 @@ func Load() (*Config, error) {
 	cfg.DBMaxConns, err = envInt64("DB_MAX_CONNS", DefaultDBMaxConns)
 	track(err)
 	cfg.DBConnectTimeout, err = envDuration("DB_CONNECT_TIMEOUT", DefaultDBConnectTimeout)
+	track(err)
+
+	cfg.RateLimitRPS, err = envInt64("RATE_LIMIT_RPS", DefaultRateLimitRPS)
+	track(err)
+	cfg.RateLimitBurst, err = envInt64("RATE_LIMIT_BURST", DefaultRateLimitBurst)
+	track(err)
+	cfg.LoginRateLimitRPM, err = envInt64("LOGIN_RATE_LIMIT_RPM", DefaultLoginRateLimitRPM)
+	track(err)
+	cfg.LoginRateLimitBurst, err = envInt64("LOGIN_RATE_LIMIT_BURST", DefaultLoginRateLimitBurst)
 	track(err)
 
 	cfg.LogLevel, err = envLogLevel("LOG_LEVEL", DefaultLogLevel)
@@ -208,6 +241,22 @@ func (c *Config) validate() []error {
 		errs = append(errs, fmt.Errorf("DB_MAX_CONNS must be positive, got %d", c.DBMaxConns))
 	}
 
+	// A zero or negative budget would lock everyone out rather than
+	// merely slowing abusers down, which is never what was meant.
+	for _, limit := range []struct {
+		name  string
+		value int64
+	}{
+		{"RATE_LIMIT_RPS", c.RateLimitRPS},
+		{"RATE_LIMIT_BURST", c.RateLimitBurst},
+		{"LOGIN_RATE_LIMIT_RPM", c.LoginRateLimitRPM},
+		{"LOGIN_RATE_LIMIT_BURST", c.LoginRateLimitBurst},
+	} {
+		if limit.value <= 0 {
+			errs = append(errs, fmt.Errorf("%s must be positive, got %d", limit.name, limit.value))
+		}
+	}
+
 	return errs
 }
 
@@ -239,6 +288,10 @@ func (c *Config) LogValue() slog.Value {
 		slog.String("database_url", redactDSN(c.DatabaseURL)),
 		slog.Int64("db_max_conns", c.DBMaxConns),
 		slog.String("db_connect_timeout", c.DBConnectTimeout.String()),
+		slog.Int64("rate_limit_rps", c.RateLimitRPS),
+		slog.Int64("rate_limit_burst", c.RateLimitBurst),
+		slog.Int64("login_rate_limit_rpm", c.LoginRateLimitRPM),
+		slog.Int64("login_rate_limit_burst", c.LoginRateLimitBurst),
 		slog.String("log_level", c.LogLevel.String()),
 		slog.String("log_format", c.LogFormat),
 	)

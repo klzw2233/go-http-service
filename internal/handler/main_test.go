@@ -51,8 +51,16 @@ func testConfig() *config.Config {
 		ShutdownTimeout:   15 * time.Second,
 		RequestTimeout:    8 * time.Second,
 		MaxBodyBytes:      1 << 20,
-		LogLevel:          slog.LevelDebug,
-		LogFormat:         config.FormatJSON,
+		// Generous enough that tests unrelated to rate limiting never
+		// trip it. A zero value here would mean rate.Limit(0), which
+		// refuses everything; config.validate rejects that on the real
+		// path, but tests build a Config directly and skip validation.
+		RateLimitRPS:        1000,
+		RateLimitBurst:      1000,
+		LoginRateLimitRPM:   1000,
+		LoginRateLimitBurst: 1000,
+		LogLevel:            slog.LevelDebug,
+		LogFormat:           config.FormatJSON,
 	}
 }
 

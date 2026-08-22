@@ -5,6 +5,7 @@ import (
 	"runtime/debug"
 
 	"github.com/gin-gonic/gin"
+	"golang.org/x/time/rate"
 
 	"go-http-service/internal/model"
 )
@@ -53,13 +54,28 @@ func SetupRouter(api *API) *gin.Engine {
 	r.NoRoute(api.handleNoRoute)
 	r.NoMethod(api.handleNoMethod)
 
-	group := r.Group(apiBasePath)
+	// Rate limiting is per-group rather than global, because the probes
+	// must not be limited at all.
+	//
+	// kubelet polls /api/health and /api/ready constantly and does so
+	// from one address, so a shared budget would throttle them and the
+	// orchestrator would start restarting healthy containers. The rate
+	// limiter would have caused the outage it exists to prevent.
+	probes := r.Group(apiBasePath)
 	{
-		group.GET("/health", api.Health)
-		group.GET("/ready", api.Ready)
-		group.GET("/info", api.Info)
-		group.POST("/echo", api.Echo)
-		group.POST("/users", api.CreateUser)
+		probes.GET("/health", api.Health)
+		probes.GET("/ready", api.Ready)
+	}
+
+	globalLimiter := newIPRateLimiter(
+		rate.Limit(api.cfg.RateLimitRPS), int(api.cfg.RateLimitBurst))
+
+	limited := r.Group(apiBasePath)
+	limited.Use(api.rateLimit(globalLimiter))
+	{
+		limited.GET("/info", api.Info)
+		limited.POST("/echo", api.Echo)
+		limited.POST("/users", api.CreateUser)
 	}
 
 	return r
