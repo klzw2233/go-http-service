@@ -1,10 +1,8 @@
 package handler
 
 import (
-	"log"
 	"net/http"
-	"os"
-	"strings"
+	"runtime/debug"
 
 	"github.com/gin-gonic/gin"
 
@@ -15,37 +13,52 @@ import (
 const apiBasePath = "/api"
 
 // SetupRouter configures and returns the application router.
-func SetupRouter() *gin.Engine {
+//
+// The middleware order below is deliberate and is the part most likely to
+// be broken by a careless edit; each step says why it sits where it does.
+func SetupRouter(api *API) *gin.Engine {
 	configureValidator()
 
 	r := gin.New()
-	r.Use(gin.Logger())
-	r.Use(gin.CustomRecovery(handlePanic))
 
-	// gin trusts every proxy by default, so c.ClientIP() believes whatever
-	// X-Forwarded-For the caller sends. No handler reads ClientIP yet, but
-	// the planned request log and rate limiter both will, and per-IP
-	// limiting against a spoofable IP is no limiting at all.
-	if err := r.SetTrustedProxies(trustedProxies()); err != nil {
-		log.Printf("trusted proxies: %v", err)
+	// 1. Correlation ID first, so everything logged afterwards carries it.
+	r.Use(requestID())
+	// 2. Access log next: it measures the whole request and must observe
+	//    the final status. It has to sit OUTSIDE Recovery — see the
+	//    comment on requestLogger for why the usual order is wrong here.
+	r.Use(requestLogger(api.log))
+	// 3. Recovery inside the logger, so a panic is turned into a 500
+	//    before the access log reads the status.
+	r.Use(gin.CustomRecovery(api.handlePanic))
+	// 4. Deadline for handler work, inherited by any query downstream.
+	r.Use(timeout(api.cfg.RequestTimeout))
+	// 5. Body cap last: it only concerns handlers that read a body.
+	r.Use(limitBodySize(api.cfg.MaxBodyBytes))
+
+	// gin trusts every proxy by default, so c.ClientIP() would believe any
+	// X-Forwarded-For it is sent. An empty list means trust nobody.
+	if err := r.SetTrustedProxies(api.cfg.TrustedProxies); err != nil {
+		// Config validates these, so this is defence in depth. Leaving the
+		// gin default in place would silently mean "trust everyone", so
+		// fail closed instead.
+		api.log.Error("invalid trusted proxies, falling back to trusting none", "error", err)
+		_ = r.SetTrustedProxies(nil)
 	}
 
 	// Off by default, which makes a known path with the wrong verb return
-	// 404 and send callers off to debug routing or deployment when the
-	// real problem is the method. gin also sets the Allow header for us
-	// once this is on, as RFC 7231 requires.
+	// 404 and send callers off to debug routing. gin also supplies the
+	// RFC 7231 Allow header once this is enabled.
 	r.HandleMethodNotAllowed = true
 
-	r.Use(limitBodySize(maxBodyBytes))
+	r.NoRoute(api.handleNoRoute)
+	r.NoMethod(api.handleNoMethod)
 
-	r.NoRoute(handleNoRoute)
-	r.NoMethod(handleNoMethod)
-
-	api := r.Group(apiBasePath)
+	group := r.Group(apiBasePath)
 	{
-		api.GET("/health", HealthHandler)
-		api.GET("/info", InfoHandler)
-		api.POST("/echo", EchoHandler)
+		group.GET("/health", api.Health)
+		group.GET("/ready", api.Ready)
+		group.GET("/info", api.Info)
+		group.POST("/echo", api.Echo)
 	}
 
 	return r
@@ -54,16 +67,16 @@ func SetupRouter() *gin.Engine {
 // handleNoRoute answers unmatched paths in JSON. gin's default writes
 // "404 page not found" as text/plain, which breaks clients that parse
 // every response as JSON.
-func handleNoRoute(c *gin.Context) {
-	respondError(c, http.StatusNotFound, model.ErrCodeNotFound,
+func (a *API) handleNoRoute(c *gin.Context) {
+	a.respondError(c, http.StatusNotFound, model.ErrCodeNotFound,
 		"no route matches this path")
 }
 
-// handleNoMethod answers a known path reached with the wrong method.
-// The response deliberately does not echo the method back, since it is
-// caller-controlled; the Allow header carries the useful information.
-func handleNoMethod(c *gin.Context) {
-	respondError(c, http.StatusMethodNotAllowed, model.ErrCodeMethodNotAllowed,
+// handleNoMethod answers a known path reached with the wrong method. The
+// response deliberately does not echo the method back, since that is
+// caller-controlled; the Allow header carries what the caller needs.
+func (a *API) handleNoMethod(c *gin.Context) {
+	a.respondError(c, http.StatusMethodNotAllowed, model.ErrCodeMethodNotAllowed,
 		"this HTTP method is not allowed on this path")
 }
 
@@ -71,31 +84,13 @@ func handleNoMethod(c *gin.Context) {
 // gin's stock Recovery aborts with a bare 500 and no body, which would be
 // the one response a client could not parse. The panic value and stack go
 // to the log; the client is told nothing it cannot act on.
-func handlePanic(c *gin.Context, recovered any) {
-	log.Printf("panic %s %s: %v", c.Request.Method, c.Request.URL.Path, recovered)
-	respondError(c, http.StatusInternalServerError, model.ErrCodeInternal,
+func (a *API) handlePanic(c *gin.Context, recovered any) {
+	a.logFor(c).Error("handler panicked",
+		"method", c.Request.Method,
+		"path", c.Request.URL.Path,
+		"panic", recovered,
+		"stack", string(debug.Stack()))
+
+	a.respondError(c, http.StatusInternalServerError, model.ErrCodeInternal,
 		"the server failed to process this request")
-}
-
-// trustedProxies returns the proxy addresses to trust, read from
-// TRUSTED_PROXIES as a comma-separated list of IPs or CIDRs.
-//
-// It returns nil when unset, meaning trust nobody and take the client IP
-// from the direct peer address. That is the safe default: it is correct
-// for a directly exposed service, and wrong only in a way that
-// under-reports rather than lets a caller forge its own address.
-func trustedProxies() []string {
-	raw := os.Getenv("TRUSTED_PROXIES")
-	if raw == "" {
-		return nil
-	}
-
-	parts := strings.Split(raw, ",")
-	proxies := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if p = strings.TrimSpace(p); p != "" {
-			proxies = append(proxies, p)
-		}
-	}
-	return proxies
 }

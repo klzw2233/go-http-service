@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"reflect"
 	"strings"
@@ -27,6 +26,10 @@ var validatorOnce sync.Once
 //	Key: 'EchoRequest.Message' Error:Field validation for 'Message' ...
 //
 // which puts an internal type name on the wire. Safe to call repeatedly.
+//
+// This stays a package-level function rather than an API method: it
+// mutates gin's process-wide validator, so once-per-process is the
+// correct scope even when several API values exist in tests.
 func configureValidator() {
 	validatorOnce.Do(func() {
 		v, ok := binding.Validator.Engine().(*validator.Validate)
@@ -44,23 +47,28 @@ func configureValidator() {
 }
 
 // respondError writes an ErrorResponse with no per-field detail.
-func respondError(c *gin.Context, status int, code model.ErrorCode, message string) {
+func (a *API) respondError(c *gin.Context, status int, code model.ErrorCode, message string) {
 	c.AbortWithStatusJSON(status, model.NewErrorResponse(code, message))
 }
 
-// respondBindError translates a request-binding failure into the project's
-// error shape.
+// respondBindError translates a request-binding failure into the
+// project's error shape.
 //
-// The raw error is logged but never returned to the client: both validator
-// and encoding/json embed Go type names in their messages, and their exact
-// wording changes across dependency versions, so callers cannot rely on it.
-func respondBindError(c *gin.Context, err error) {
-	log.Printf("bind %s %s: %v", c.Request.Method, c.Request.URL.Path, err)
+// The raw error is logged but never returned: validator and
+// encoding/json both embed Go type names in their messages, and their
+// wording changes across dependency versions, so callers cannot rely on
+// it. Logging happens through logFor so the record carries the same
+// request ID as the access log line.
+func (a *API) respondBindError(c *gin.Context, err error) {
+	a.logFor(c).Warn("request binding failed",
+		"method", c.Request.Method,
+		"path", c.Request.URL.Path,
+		"error", err)
 
 	// Body exceeded the limit set by the limitBodySize middleware.
 	var tooLarge *http.MaxBytesError
 	if errors.As(err, &tooLarge) {
-		respondError(c, http.StatusRequestEntityTooLarge, model.ErrCodePayloadTooLarge,
+		a.respondError(c, http.StatusRequestEntityTooLarge, model.ErrCodePayloadTooLarge,
 			fmt.Sprintf("request body must not exceed %d bytes", tooLarge.Limit))
 		return
 	}
@@ -101,13 +109,13 @@ func respondBindError(c *gin.Context, err error) {
 	// Malformed or truncated JSON.
 	var syntax *json.SyntaxError
 	if errors.As(err, &syntax) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
-		respondError(c, http.StatusBadRequest, model.ErrCodeInvalidJSON,
+		a.respondError(c, http.StatusBadRequest, model.ErrCodeInvalidJSON,
 			"request body is not valid JSON")
 		return
 	}
 
 	// Unrecognised failure. Stay generic rather than risk leaking internals.
-	respondError(c, http.StatusBadRequest, model.ErrCodeInvalidJSON,
+	a.respondError(c, http.StatusBadRequest, model.ErrCodeInvalidJSON,
 		"request body could not be processed")
 }
 

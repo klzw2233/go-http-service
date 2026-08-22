@@ -8,7 +8,7 @@ import (
 	"go-http-service/internal/model"
 )
 
-// InfoHandler handles GET /api/info and returns service metadata.
-func InfoHandler(c *gin.Context) {
-	c.JSON(http.StatusOK, model.NewInfoResponse(now()))
+// Info handles GET /api/info and returns service metadata.
+func (a *API) Info(c *gin.Context) {
+	c.JSON(http.StatusOK, model.NewInfoResponse(a.now()))
 }

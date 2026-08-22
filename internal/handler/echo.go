@@ -8,13 +8,13 @@ import (
 	"go-http-service/internal/model"
 )
 
-// EchoHandler handles POST /api/echo and returns the message back.
-func EchoHandler(c *gin.Context) {
+// Echo handles POST /api/echo and returns the message back.
+func (a *API) Echo(c *gin.Context) {
 	var req model.EchoRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		respondBindError(c, err)
+		a.respondBindError(c, err)
 		return
 	}
 
-	c.JSON(http.StatusOK, model.NewEchoResponse(req.Message, now()))
+	c.JSON(http.StatusOK, model.NewEchoResponse(req.Message, a.now()))
 }

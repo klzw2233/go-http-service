@@ -4,56 +4,63 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
+	"go-http-service/internal/config"
 	"go-http-service/internal/handler"
-)
-
-const (
-	// defaultPort is used when the PORT environment variable is unset.
-	defaultPort = "8080"
-
-	// readHeaderTimeout bounds how long a client may take to send its
-	// request headers. Without it a slow trickle of headers pins a
-	// goroutine and a file descriptor forever (Slowloris). gin's Run()
-	// leaves every timeout at zero, which is why we build the server here.
-	readHeaderTimeout = 5 * time.Second
-
-	// readTimeout bounds reading the whole request, headers plus body.
-	readTimeout = 10 * time.Second
-
-	// writeTimeout bounds writing the response back to the client.
-	writeTimeout = 10 * time.Second
-
-	// idleTimeout bounds how long a keep-alive connection may sit unused.
-	idleTimeout = 60 * time.Second
-
-	// shutdownTimeout bounds how long we wait for in-flight requests to
-	// finish after a shutdown signal before giving up on them.
-	shutdownTimeout = 15 * time.Second
 )
 
 func main() {
 	if err := run(); err != nil {
-		log.Fatalf("server: %v", err)
+		// Config may have failed before a logger existed, so this goes
+		// through slog's default handler (text, stderr).
+		slog.Error("server stopped with an error", "error", err)
+		os.Exit(1)
 	}
 }
 
-// run starts the HTTP server and blocks until it is asked to stop or
-// fails. It returns nil only after a clean shutdown.
+// run wires the dependencies, serves, and blocks until told to stop or a
+// failure occurs. It returns nil only after a clean shutdown.
 func run() error {
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
+
+	logger := newLogger(cfg, os.Stdout)
+	slog.SetDefault(logger)
+
+	// Dependencies are built here and released in reverse. The database
+	// pool slots in at this point:
+	//
+	//	pool, err := db.Connect(ctx, cfg)
+	//	if err != nil {
+	//		return fmt.Errorf("database: %w", err)
+	//	}
+	//	defer pool.Close()
+	//
+	// Registering that defer HERE, above the server, is what gets the
+	// teardown order right. Shutdown below is a plain call, so it finishes
+	// draining in-flight requests before run returns and the deferred
+	// pool.Close finally executes. Closing the pool first would cut off
+	// queries that requests are still waiting on.
+
+	api := handler.New(cfg, logger)
+	// Once the pool exists, register its probe so /api/ready reports it:
+	//	handler.New(cfg, logger, handler.WithReadyCheck("database", pool.Ping))
+
 	srv := &http.Server{
-		Addr:              ":" + port(),
-		Handler:           handler.SetupRouter(),
-		ReadHeaderTimeout: readHeaderTimeout,
-		ReadTimeout:       readTimeout,
-		WriteTimeout:      writeTimeout,
-		IdleTimeout:       idleTimeout,
+		Addr:              cfg.Addr(),
+		Handler:           handler.SetupRouter(api),
+		ReadHeaderTimeout: cfg.ReadHeaderTimeout,
+		ReadTimeout:       cfg.ReadTimeout,
+		WriteTimeout:      cfg.WriteTimeout,
+		IdleTimeout:       cfg.IdleTimeout,
 	}
 
 	// Cancels ctx on SIGINT or SIGTERM. SIGTERM is what Docker and
@@ -64,7 +71,7 @@ func run() error {
 	// Buffered so the goroutine never blocks if nobody is receiving.
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf("listening on %s", srv.Addr)
+		logger.Info("server listening", "addr", srv.Addr, "config", cfg)
 		// Shutdown makes ListenAndServe return ErrServerClosed; that is
 		// the expected path, not a failure.
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -74,8 +81,7 @@ func run() error {
 
 	select {
 	case err := <-errCh:
-		// Startup failed, typically because the port is taken. Previously
-		// this error was discarded and the process exited with status 0.
+		// Startup failed, typically because the port is taken.
 		return fmt.Errorf("listen on %s: %w", srv.Addr, err)
 	case <-ctx.Done():
 		// Restore default signal handling so a second Ctrl-C during a slow
@@ -83,24 +89,29 @@ func run() error {
 		stop()
 	}
 
-	log.Printf("shutdown signal received, draining for up to %s", shutdownTimeout)
+	logger.Info("shutdown signal received, draining", "timeout", cfg.ShutdownTimeout)
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		return fmt.Errorf("graceful shutdown: %w", err)
 	}
 
-	log.Println("server stopped cleanly")
+	logger.Info("server stopped cleanly")
 	return nil
 }
 
-// port returns the listen port, preferring the PORT environment variable
-// so the container runtime can assign it without a rebuild.
-func port() string {
-	if p := os.Getenv("PORT"); p != "" {
-		return p
+// newLogger builds the structured logger described by cfg. The writer is
+// a parameter so tests can capture the output.
+func newLogger(cfg *config.Config, w io.Writer) *slog.Logger {
+	opts := &slog.HandlerOptions{Level: cfg.LogLevel}
+
+	var h slog.Handler
+	if cfg.LogFormat == config.FormatText {
+		h = slog.NewTextHandler(w, opts)
+	} else {
+		h = slog.NewJSONHandler(w, opts)
 	}
-	return defaultPort
+	return slog.New(h)
 }

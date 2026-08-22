@@ -16,7 +16,7 @@ import (
 )
 
 func TestHealthEndpoint(t *testing.T) {
-	withFixedTime(t)
+	t.Parallel()
 
 	w := request{method: http.MethodGet, path: "/api/health"}.do(t)
 
@@ -28,8 +28,22 @@ func TestHealthEndpoint(t *testing.T) {
 		"timestamp = %s, want %s", got.Timestamp, fixedTime)
 }
 
+// TestHealthIgnoresFailingDependencies pins the liveness contract: a
+// broken dependency must not make /api/health fail, or an orchestrator
+// would restart a process that is running fine.
+func TestHealthIgnoresFailingDependencies(t *testing.T) {
+	t.Parallel()
+
+	api := newTestAPI(WithReadyCheck("always-broken", failingCheck))
+	w := request{method: http.MethodGet, path: "/api/health"}.doOn(t, SetupRouter(api))
+
+	var got model.HealthResponse
+	requireJSONResponse(t, w, http.StatusOK, &got)
+	assert.Equal(t, model.StatusOK, got.Status)
+}
+
 func TestInfoEndpoint(t *testing.T) {
-	withFixedTime(t)
+	t.Parallel()
 
 	w := request{method: http.MethodGet, path: "/api/info"}.do(t)
 
@@ -46,7 +60,7 @@ func TestInfoEndpoint(t *testing.T) {
 }
 
 func TestEchoEndpoint_Success(t *testing.T) {
-	withFixedTime(t)
+	t.Parallel()
 
 	tests := []struct {
 		name        string
@@ -124,6 +138,8 @@ func TestEchoEndpoint_Success(t *testing.T) {
 }
 
 func TestEchoEndpoint_Errors(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name        string
 		body        string
@@ -187,8 +203,8 @@ func TestEchoEndpoint_Errors(t *testing.T) {
 			wantNoField: true,
 		},
 		{
-			name:        "请求体超过 1 MiB",
-			body:        fmt.Sprintf(`{"message":%q}`, strings.Repeat("b", 2*maxBodyBytes)),
+			name:        "请求体超过上限",
+			body:        fmt.Sprintf(`{"message":%q}`, strings.Repeat("b", 2*int(testConfig().MaxBodyBytes))),
 			wantStatus:  http.StatusRequestEntityTooLarge,
 			wantCode:    model.ErrCodePayloadTooLarge,
 			wantNoField: true,
@@ -223,6 +239,8 @@ func TestEchoEndpoint_Errors(t *testing.T) {
 // validator and encoding/json put internal names on the wire, e.g.
 // "Key: 'EchoRequest.Message' Error:Field validation for 'Message' ...".
 func TestErrorsNeverExposeGoIdentifiers(t *testing.T) {
+	t.Parallel()
+
 	bodies := []struct{ name, body string }{
 		{"缺少字段", `{}`},
 		{"空字符串", `{"message":""}`},
@@ -253,6 +271,8 @@ func TestErrorsNeverExposeGoIdentifiers(t *testing.T) {
 }
 
 func TestRouting(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name       string
 		method     string
@@ -299,6 +319,14 @@ func TestRouting(t *testing.T) {
 			wantCode:   model.ErrCodeMethodNotAllowed,
 			wantAllow:  "GET",
 		},
+		{
+			name:       "readiness 路由也遵守方法限制",
+			method:     http.MethodPost,
+			path:       "/api/ready",
+			wantStatus: http.StatusMethodNotAllowed,
+			wantCode:   model.ErrCodeMethodNotAllowed,
+			wantAllow:  "GET",
+		},
 	}
 
 	for _, tt := range tests {
@@ -322,9 +350,11 @@ func TestRouting(t *testing.T) {
 // Recovery aborts with a bare 500 and no body, which would be the one
 // response a JSON client could not parse.
 func TestPanicReturnsJSON(t *testing.T) {
-	// A dedicated router so the panicking route is not visible to the
+	t.Parallel()
+
+	// A dedicated router so the panicking route is invisible to the
 	// routing tests running in parallel.
-	r := SetupRouter()
+	r := SetupRouter(newTestAPI())
 	r.GET("/api/boom", func(*gin.Context) { panic("simulated handler failure") })
 
 	req := httptest.NewRequest(http.MethodGet, "/api/boom", nil)
@@ -345,18 +375,22 @@ func TestPanicReturnsJSON(t *testing.T) {
 // TestClientIPIgnoresForwardedHeader covers the SetTrustedProxies fix.
 // With no trusted proxies, a caller cannot forge its own address.
 func TestClientIPIgnoresForwardedHeader(t *testing.T) {
+	t.Parallel()
+
 	const realPeer = "203.0.113.9"
 
-	r := SetupRouter()
+	r := SetupRouter(newTestAPI())
 	r.GET("/api/whoami", func(c *gin.Context) { c.String(http.StatusOK, c.ClientIP()) })
 
-	req := httptest.NewRequest(http.MethodGet, "/api/whoami", nil)
-	req.RemoteAddr = realPeer + ":1234"
-	req.Header.Set("X-Forwarded-For", "1.2.3.4")
-	req.Header.Set("X-Real-IP", "5.6.7.8")
-
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, req)
+	w := request{
+		method:     http.MethodGet,
+		path:       "/api/whoami",
+		remoteAddr: realPeer + ":1234",
+		headers: map[string]string{
+			"X-Forwarded-For": "1.2.3.4",
+			"X-Real-IP":       "5.6.7.8",
+		},
+	}.doOn(t, r)
 
 	assert.Equal(t, realPeer, w.Body.String(),
 		"a spoofed forwarding header must not become the client IP")

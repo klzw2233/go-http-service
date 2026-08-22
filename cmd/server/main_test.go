@@ -1,50 +1,103 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"go-http-service/internal/config"
 )
 
-func TestPort(t *testing.T) {
+// TestNewLogger covers the only real logic left in package main after
+// PORT parsing moved to the config package.
+func TestNewLogger(t *testing.T) {
 	tests := []struct {
-		name string
-		env  string
-		set  bool
-		want string
+		name   string
+		format string
+		level  slog.Level
+		// emit is logged at info level; wantEmitted says whether the
+		// configured level lets it through.
+		wantEmitted bool
+		wantJSON    bool
 	}{
 		{
-			name: "未设置时回退到默认端口",
-			set:  false,
-			want: defaultPort,
+			name:        "JSON 格式",
+			format:      config.FormatJSON,
+			level:       slog.LevelInfo,
+			wantEmitted: true,
+			wantJSON:    true,
 		},
 		{
-			name: "设置后覆盖默认值",
-			env:  "9090",
-			set:  true,
-			want: "9090",
+			name:        "text 格式",
+			format:      config.FormatText,
+			level:       slog.LevelInfo,
+			wantEmitted: true,
+			wantJSON:    false,
 		},
 		{
-			name: "设置为空串时视作未设置",
-			env:  "",
-			set:  true,
-			want: defaultPort,
+			name:        "debug 级别放行 info",
+			format:      config.FormatJSON,
+			level:       slog.LevelDebug,
+			wantEmitted: true,
+			wantJSON:    true,
+		},
+		{
+			name:        "error 级别过滤掉 info",
+			format:      config.FormatJSON,
+			level:       slog.LevelError,
+			wantEmitted: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// t.Setenv handles restoring the previous value, but it
-			// forbids t.Parallel, which is why these run serially.
-			if tt.set {
-				t.Setenv("PORT", tt.env)
-			} else {
-				// Ensure a PORT inherited from the shell cannot make this
-				// case pass or fail by accident.
-				t.Setenv("PORT", "")
+			t.Parallel()
+
+			var buf bytes.Buffer
+			cfg := &config.Config{LogFormat: tt.format, LogLevel: tt.level}
+
+			newLogger(cfg, &buf).Info("hello", "key", "value")
+
+			out := buf.String()
+			if !tt.wantEmitted {
+				assert.Empty(t, out, "该级别不应输出 info 日志")
+				return
 			}
 
-			assert.Equal(t, tt.want, port())
+			require.NotEmpty(t, out)
+			assert.Contains(t, out, "hello")
+			assert.Contains(t, out, "value")
+
+			if tt.wantJSON {
+				var record map[string]any
+				require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(out)), &record),
+					"JSON 格式的输出应该能被解析: %s", out)
+				assert.Equal(t, "hello", record["msg"])
+				assert.Equal(t, "value", record["key"])
+			} else {
+				// text handler 用 key=value，不是 JSON
+				assert.Contains(t, out, "key=value")
+				assert.False(t, json.Valid([]byte(out)), "text 格式不应是合法 JSON")
+			}
 		})
 	}
+}
+
+// TestNewLoggerDefaultsToJSON pins that an unrecognised format falls back
+// to JSON rather than producing no logger. config.Load rejects bad values
+// before this point, so this only guards direct construction.
+func TestNewLoggerDefaultsToJSON(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	cfg := &config.Config{LogFormat: "something-else", LogLevel: slog.LevelInfo}
+
+	newLogger(cfg, &buf).Info("hello")
+
+	assert.True(t, json.Valid([]byte(strings.TrimSpace(buf.String()))))
 }
