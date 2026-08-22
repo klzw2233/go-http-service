@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -39,6 +40,15 @@ const (
 	DefaultRequestTimeout    = 8 * time.Second
 
 	DefaultMaxBodyBytes int64 = 1 << 20 // 1 MiB
+
+	// DefaultDBMaxConns fixes the pool size. pgx defaults to the greater
+	// of 4 and the CPU count, which silently changes the load a database
+	// sees when the service moves to a different machine.
+	DefaultDBMaxConns int64 = 10
+
+	// DefaultDBConnectTimeout bounds establishing a connection, and is
+	// reused as the readiness probe's timeout.
+	DefaultDBConnectTimeout = 5 * time.Second
 
 	DefaultLogLevel  = slog.LevelInfo
 	DefaultLogFormat = FormatJSON
@@ -74,6 +84,23 @@ type Config struct {
 	// MaxBodyBytes caps the request body. Env: MAX_BODY_BYTES.
 	MaxBodyBytes int64
 
+	// DatabaseURL is the PostgreSQL connection string. Env: DATABASE_URL.
+	//
+	// Empty means no database: the service starts, registers no database
+	// readiness check, and serves the endpoints that need no persistence.
+	// That is honest for now, since none of them do. It becomes required
+	// once the first database-backed endpoint exists.
+	//
+	// Never log this value directly; see LogValue and redactDSN.
+	DatabaseURL string
+
+	// DBMaxConns is the connection pool ceiling. Env: DB_MAX_CONNS.
+	DBMaxConns int64
+
+	// DBConnectTimeout bounds establishing a connection, and doubles as
+	// the readiness probe timeout. Env: DB_CONNECT_TIMEOUT.
+	DBConnectTimeout time.Duration
+
 	// LogLevel is the minimum level to emit. Env: LOG_LEVEL.
 	LogLevel slog.Level
 
@@ -100,6 +127,7 @@ func Load() (*Config, error) {
 		Port:           envString("PORT", DefaultPort),
 		TrustedProxies: envList("TRUSTED_PROXIES"),
 		LogFormat:      strings.ToLower(envString("LOG_FORMAT", DefaultLogFormat)),
+		DatabaseURL:    envString("DATABASE_URL", ""),
 	}
 
 	var err error
@@ -118,6 +146,11 @@ func Load() (*Config, error) {
 	track(err)
 
 	cfg.MaxBodyBytes, err = envInt64("MAX_BODY_BYTES", DefaultMaxBodyBytes)
+	track(err)
+
+	cfg.DBMaxConns, err = envInt64("DB_MAX_CONNS", DefaultDBMaxConns)
+	track(err)
+	cfg.DBConnectTimeout, err = envDuration("DB_CONNECT_TIMEOUT", DefaultDBConnectTimeout)
 	track(err)
 
 	cfg.LogLevel, err = envLogLevel("LOG_LEVEL", DefaultLogLevel)
@@ -167,6 +200,12 @@ func (c *Config) validate() []error {
 			c.RequestTimeout, c.WriteTimeout))
 	}
 
+	// Pool settings only matter when a database is configured, so an
+	// unused DB_MAX_CONNS=0 is not worth failing a deployment over.
+	if c.DatabaseURL != "" && c.DBMaxConns <= 0 {
+		errs = append(errs, fmt.Errorf("DB_MAX_CONNS must be positive, got %d", c.DBMaxConns))
+	}
+
 	return errs
 }
 
@@ -175,14 +214,15 @@ func (c *Config) Addr() string { return ":" + c.Port }
 
 // LogValue renders the config for structured logging.
 //
-// It exists so startup can log the effective settings. When database
-// credentials are added, redact them here rather than at each call site.
+// It exists so startup can log the effective settings. Durations are
+// rendered as strings ("5s") rather than with slog.Duration, which a JSON
+// handler emits as a nanosecond integer. This value is a config dump read
+// by a human deciding whether the deployment picked up the right
+// settings, and 5000000000 does not answer that question at a glance.
 //
-// Durations are rendered as strings ("5s") rather than with
-// slog.Duration, which a JSON handler emits as a nanosecond integer.
-// This value is a config dump read by a human deciding whether the
-// deployment picked up the right settings, and 5000000000 does not
-// answer that question at a glance.
+// DatabaseURL goes through redactDSN: it carries a password, and this
+// record is written on every start and kept by whatever collects the
+// logs.
 func (c *Config) LogValue() slog.Value {
 	return slog.GroupValue(
 		slog.String("port", c.Port),
@@ -194,9 +234,44 @@ func (c *Config) LogValue() slog.Value {
 		slog.String("shutdown_timeout", c.ShutdownTimeout.String()),
 		slog.String("request_timeout", c.RequestTimeout.String()),
 		slog.Int64("max_body_bytes", c.MaxBodyBytes),
+		slog.String("database_url", redactDSN(c.DatabaseURL)),
+		slog.Int64("db_max_conns", c.DBMaxConns),
+		slog.String("db_connect_timeout", c.DBConnectTimeout.String()),
 		slog.String("log_level", c.LogLevel.String()),
 		slog.String("log_format", c.LogFormat),
 	)
+}
+
+// Placeholders used in place of a connection string.
+const (
+	dsnUnset = "(unset)"
+	// dsnOpaque is used when the DSN cannot be parsed as a URL, which is
+	// the case for the keyword/value form pgx also accepts
+	// ("host=... password=..."). Reporting that it is set is the most we
+	// can say without risking the credential.
+	dsnOpaque = "(set)"
+)
+
+// redactDSN renders a connection string safe to log.
+//
+// url.Redacted replaces the password with "xxxxx" while keeping the host,
+// port and database name, which is what makes the log useful for
+// confirming a deployment connected where it was meant to.
+//
+// Anything that does not parse as a URL falls back to a fixed
+// placeholder. It never falls back to returning the input: a DSN that
+// failed to parse is exactly the case where a stray credential would be
+// printed.
+func redactDSN(dsn string) string {
+	if dsn == "" {
+		return dsnUnset
+	}
+
+	u, err := url.Parse(dsn)
+	if err != nil || u.Scheme == "" {
+		return dsnOpaque
+	}
+	return u.Redacted()
 }
 
 func validatePort(p string) error {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"log/slog"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +21,7 @@ var envVars = []string{
 	"READ_HEADER_TIMEOUT", "READ_TIMEOUT", "WRITE_TIMEOUT", "IDLE_TIMEOUT",
 	"SHUTDOWN_TIMEOUT", "REQUEST_TIMEOUT",
 	"MAX_BODY_BYTES", "LOG_LEVEL", "LOG_FORMAT",
+	"DATABASE_URL", "DB_MAX_CONNS", "DB_CONNECT_TIMEOUT",
 }
 
 // setEnv clears every known variable, then applies the given overrides.
@@ -52,6 +54,9 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, DefaultMaxBodyBytes, cfg.MaxBodyBytes)
 	assert.Equal(t, DefaultLogLevel, cfg.LogLevel)
 	assert.Equal(t, DefaultLogFormat, cfg.LogFormat)
+	assert.Empty(t, cfg.DatabaseURL, "未设置时不连库")
+	assert.Equal(t, DefaultDBMaxConns, cfg.DBMaxConns)
+	assert.Equal(t, DefaultDBConnectTimeout, cfg.DBConnectTimeout)
 }
 
 func TestLoad_Overrides(t *testing.T) {
@@ -67,6 +72,9 @@ func TestLoad_Overrides(t *testing.T) {
 		"MAX_BODY_BYTES":      "2048",
 		"LOG_LEVEL":           "debug",
 		"LOG_FORMAT":          "text",
+		"DATABASE_URL":        "postgres://app:pw@db:5432/svc",
+		"DB_MAX_CONNS":        "25",
+		"DB_CONNECT_TIMEOUT":  "3s",
 	})
 
 	cfg, err := Load()
@@ -85,6 +93,9 @@ func TestLoad_Overrides(t *testing.T) {
 	assert.Equal(t, int64(2048), cfg.MaxBodyBytes)
 	assert.Equal(t, slog.LevelDebug, cfg.LogLevel)
 	assert.Equal(t, FormatText, cfg.LogFormat)
+	assert.Equal(t, "postgres://app:pw@db:5432/svc", cfg.DatabaseURL)
+	assert.Equal(t, int64(25), cfg.DBMaxConns)
+	assert.Equal(t, 3*time.Second, cfg.DBConnectTimeout)
 }
 
 // TestLoad_EmptyMeansUnset pins that an explicitly empty variable falls
@@ -169,6 +180,19 @@ func TestLoad_InvalidValues(t *testing.T) {
 			},
 			wantErr: "must be shorter than WRITE_TIMEOUT",
 		},
+		{
+			name: "配了库但连接数为零",
+			env: map[string]string{
+				"DATABASE_URL": "postgres://app:pw@db:5432/svc",
+				"DB_MAX_CONNS": "0",
+			},
+			wantErr: "DB_MAX_CONNS must be positive",
+		},
+		{
+			name:    "建连超时为负",
+			env:     map[string]string{"DB_CONNECT_TIMEOUT": "-1s"},
+			wantErr: "DB_CONNECT_TIMEOUT must be positive",
+		},
 	}
 
 	for _, tt := range tests {
@@ -204,27 +228,31 @@ func TestLoad_ReportsEveryProblem(t *testing.T) {
 	assert.Equal(t, 3, strings.Count(got, "\n")+1, "应恰好三条错误")
 }
 
-func TestLogValueRedactsNothingYet(t *testing.T) {
+// TestLogValueCoversEveryField fails when a field is added to Config but
+// not to LogValue, which would make the startup record quietly
+// incomplete. Comparing counts rather than names avoids inventing a
+// CamelCase-to-snake_case rule that has to special-case DB and URL.
+func TestLogValueCoversEveryField(t *testing.T) {
 	setEnv(t, map[string]string{"PORT": "9000"})
 
 	cfg, err := Load()
 	require.NoError(t, err)
 
-	attrs := cfg.LogValue()
-	require.Equal(t, slog.KindGroup, attrs.Kind())
+	value := cfg.LogValue()
+	require.Equal(t, slog.KindGroup, value.Kind())
 
-	found := map[string]bool{}
-	for _, a := range attrs.Group() {
-		found[a.Key] = true
-	}
+	logged := value.Group()
+	fields := reflect.TypeOf(Config{}).NumField()
 
-	// Guards against a field being added to Config but forgotten here.
-	for _, key := range []string{
-		"port", "trusted_proxies", "read_header_timeout", "read_timeout",
-		"write_timeout", "idle_timeout", "shutdown_timeout", "request_timeout",
-		"max_body_bytes", "log_level", "log_format",
-	} {
-		assert.True(t, found[key], "LogValue 缺少字段 %q", key)
+	require.Len(t, logged, fields,
+		"Config 有 %d 个字段但 LogValue 输出了 %d 个，新增字段忘了同步？", fields, len(logged))
+
+	// Keys must be unique; a copy-paste slip would otherwise hide a field.
+	seen := make(map[string]bool, len(logged))
+	for _, attr := range logged {
+		assert.NotEmpty(t, attr.Key)
+		assert.False(t, seen[attr.Key], "字段 %q 重复", attr.Key)
+		seen[attr.Key] = true
 	}
 }
 
@@ -260,4 +288,98 @@ func TestLogValueRendersDurationsReadably(t *testing.T) {
 	// Non-duration fields keep their natural types.
 	assert.Equal(t, float64(DefaultMaxBodyBytes), record.Config["max_body_bytes"])
 	assert.Equal(t, DefaultPort, record.Config["port"])
+}
+
+// dsnPassword is the credential every redaction test plants, so an
+// assertion that it did not appear is checking something real.
+const dsnPassword = "sup3rs3cr3t"
+
+// TestLogValueRedactsDatabasePassword is the one test in this package
+// that guards a credential rather than a behaviour.
+//
+// LogValue is written on every start and kept by whatever collects the
+// logs, so a raw DSN here means the database password is on disk in
+// perpetuity.
+func TestLogValueRedactsDatabasePassword(t *testing.T) {
+	dsn := "postgres://app:" + dsnPassword + "@db.internal:5432/svc?sslmode=disable"
+	setEnv(t, map[string]string{"DATABASE_URL": dsn})
+
+	cfg, err := Load()
+	require.NoError(t, err)
+
+	var buf bytes.Buffer
+	slog.New(slog.NewJSONHandler(&buf, nil)).Info("startup", "config", cfg)
+	logged := buf.String()
+
+	assert.NotContains(t, logged, dsnPassword, "启动日志泄露了数据库密码: %s", logged)
+
+	var record struct {
+		Config map[string]any `json:"config"`
+	}
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &record))
+
+	got, _ := record.Config["database_url"].(string)
+	assert.Contains(t, got, "xxxxx", "密码应被替换为 xxxxx")
+	// Host and database survive: that is what makes the record useful for
+	// confirming the deployment connected where it was meant to.
+	assert.Contains(t, got, "db.internal:5432")
+	assert.Contains(t, got, "svc")
+}
+
+func TestRedactDSN(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		dsn  string
+		want string
+	}{
+		{
+			name: "未设置",
+			dsn:  "",
+			want: dsnUnset,
+		},
+		{
+			name: "标准 URL 形式",
+			dsn:  "postgres://app:" + dsnPassword + "@db:5432/svc",
+			want: "postgres://app:xxxxx@db:5432/svc",
+		},
+		{
+			name: "无密码",
+			dsn:  "postgres://app@db:5432/svc",
+			want: "postgres://app@db:5432/svc",
+		},
+		{
+			name: "无用户信息",
+			dsn:  "postgres://db:5432/svc",
+			want: "postgres://db:5432/svc",
+		},
+		{
+			// pgx also accepts the keyword/value form, which url.Parse
+			// reads as a bare path with no scheme. Returning a fixed
+			// placeholder is the only safe answer: the string contains a
+			// password and there is no structure to redact.
+			name: "keyword/value 形式",
+			dsn:  "host=db port=5432 user=app password=" + dsnPassword,
+			want: dsnOpaque,
+		},
+		{
+			name: "无法解析",
+			dsn:  "://///",
+			want: dsnOpaque,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := redactDSN(tt.dsn)
+
+			assert.Equal(t, tt.want, got)
+			if tt.dsn != "" {
+				assert.NotContains(t, got, dsnPassword, "脱敏结果仍含密码")
+			}
+		})
+	}
 }

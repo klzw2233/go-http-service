@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"go-http-service/internal/config"
+	"go-http-service/internal/db"
 	"go-http-service/internal/handler"
 )
 
@@ -46,24 +47,42 @@ func run() error {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
-	// Dependencies are built here and released in reverse. The database
-	// pool slots in at this point:
-	//
-	//	pool, err := db.Connect(ctx, cfg)
-	//	if err != nil {
-	//		return fmt.Errorf("database: %w", err)
-	//	}
-	//	defer pool.Close()
-	//
-	// Registering that defer HERE, above the server, is what gets the
-	// teardown order right. Shutdown below is a plain call, so it finishes
-	// draining in-flight requests before run returns and the deferred
-	// pool.Close finally executes. Closing the pool first would cut off
-	// queries that requests are still waiting on.
+	// Cancels ctx on SIGINT or SIGTERM. SIGTERM is what Docker and
+	// Kubernetes send first when stopping a container.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
-	api := handler.New(cfg, logger)
-	// Once the pool exists, register its probe so /api/ready reports it:
-	//	handler.New(cfg, logger, handler.WithReadyCheck("database", pool.Ping))
+	// The database is optional for now: no endpoint needs persistence
+	// yet, so requiring it would force a dependency nothing uses. This
+	// becomes required once the first database-backed endpoint lands.
+	var apiOpts []handler.Option
+
+	if cfg.DatabaseURL != "" {
+		pool, err := db.Connect(ctx, cfg)
+		if err != nil {
+			return fmt.Errorf("database: %w", err)
+		}
+
+		// Registered HERE, above the server, and that placement is the
+		// whole point. defer runs last-in-first-out while srv.Shutdown
+		// below is an ordinary call, so the real order is: drain
+		// in-flight HTTP requests, return from run, then close the pool.
+		// Closing the pool first would cut off queries that requests are
+		// still waiting on.
+		defer func() {
+			logger.Info("closing database pool")
+			pool.Close()
+		}()
+
+		apiOpts = append(apiOpts, handler.WithReadyCheck("database",
+			db.HealthCheck(pool, cfg.DBConnectTimeout)))
+
+		logger.Info("database pool ready", "max_conns", cfg.DBMaxConns)
+	} else {
+		logger.Warn("DATABASE_URL is unset, starting without a database")
+	}
+
+	api := handler.New(cfg, logger, apiOpts...)
 
 	srv := &http.Server{
 		Addr:              cfg.Addr(),
@@ -73,11 +92,6 @@ func run() error {
 		WriteTimeout:      cfg.WriteTimeout,
 		IdleTimeout:       cfg.IdleTimeout,
 	}
-
-	// Cancels ctx on SIGINT or SIGTERM. SIGTERM is what Docker and
-	// Kubernetes send first when stopping a container.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	// Buffered so the goroutine never blocks if nobody is receiving.
 	errCh := make(chan error, 1)

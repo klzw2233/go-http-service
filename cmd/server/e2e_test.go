@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,10 +43,18 @@ func TestEndToEnd(t *testing.T) {
 			line := srv.firstLogLine(t)
 			t.Logf("实际启动日志: %s", line)
 
-			var rec map[string]any
-			require.NoError(t, json.Unmarshal([]byte(line), &rec),
-				"启动日志不是合法 JSON: %s", line)
-			assert.Equal(t, "server listening", rec["msg"])
+			// Every line, not just the first. This is what caught gin
+			// printing its debug banner to stdout: one non-JSON line
+			// anywhere breaks a collector parsing line by line, and
+			// checking only the first would miss it once something else
+			// logs earlier.
+			for _, l := range srv.logLines(t) {
+				assert.True(t, json.Valid([]byte(l)),
+					"日志流里有非 JSON 的行: %s", l)
+			}
+
+			rec := srv.recordWithMsg(t, "server listening")
+
 			assert.Equal(t, "INFO", rec["level"])
 			// Config is logged through slog.LogValuer as a group.
 			cfg, ok := rec["config"].(map[string]any)
@@ -169,11 +178,20 @@ func TestEndToEnd(t *testing.T) {
 		srv := startServer(t, bin, map[string]string{"LOG_FORMAT": "text"})
 		defer srv.terminate(t)
 
-		line := srv.firstLogLine(t)
+		var listening string
+		require.Eventually(t, func() bool {
+			for _, line := range srv.logLines(t) {
+				if strings.Contains(line, `msg="server listening"`) {
+					listening = line
+					return true
+				}
+			}
+			return false
+		}, 5*time.Second, 20*time.Millisecond, "没有找到启动日志:\n%s", srv.output())
 
-		assert.False(t, json.Valid([]byte(line)), "text 格式不应是 JSON: %s", line)
-		assert.Contains(t, line, "level=INFO")
-		assert.Contains(t, line, `msg="server listening"`)
+		assert.False(t, json.Valid([]byte(listening)),
+			"text 格式不应是 JSON: %s", listening)
+		assert.Contains(t, listening, "level=INFO")
 	})
 
 	// The point of validating config at startup: a typo stops the
@@ -229,6 +247,116 @@ func TestEndToEnd(t *testing.T) {
 		require.Error(t, err, "端口冲突必须以非零码退出，输出: %s", out)
 		assert.Contains(t, string(out), "address already in use")
 	})
+
+	t.Run("带数据库", func(t *testing.T) {
+		dsn := os.Getenv("TEST_DATABASE_URL")
+		if dsn == "" {
+			t.Skip("TEST_DATABASE_URL 未设置，跳过需要真实数据库的端到端测试")
+		}
+
+		srv := startServer(t, bin, map[string]string{"DATABASE_URL": dsn})
+
+		t.Run("ready 报告 database 检查为 ok", func(t *testing.T) {
+			resp, body := srv.get(t, "/api/ready")
+
+			require.Equal(t, http.StatusOK, resp.StatusCode, "body: %s", body)
+
+			var got struct {
+				Status string `json:"status"`
+				Checks []struct {
+					Name       string `json:"name"`
+					Status     string `json:"status"`
+					DurationMS int64  `json:"duration_ms"`
+					Error      string `json:"error"`
+				} `json:"checks"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(body), &got))
+
+			assert.Equal(t, "ready", got.Status)
+			require.Len(t, got.Checks, 1, "应只有 database 一个检查")
+			assert.Equal(t, "database", got.Checks[0].Name)
+			assert.Equal(t, "ok", got.Checks[0].Status)
+			assert.Empty(t, got.Checks[0].Error)
+		})
+
+		t.Run("health 不受数据库影响", func(t *testing.T) {
+			resp, _ := srv.get(t, "/api/health")
+			assert.Equal(t, http.StatusOK, resp.StatusCode)
+		})
+
+		// The startup record dumps the whole config, so this is where a
+		// DSN password would end up on disk if redaction regressed.
+		t.Run("启动日志不含数据库密码", func(t *testing.T) {
+			password := passwordOf(t, dsn)
+			if password == "" {
+				t.Skip("TEST_DATABASE_URL 里没有密码，无从验证")
+			}
+
+			assert.NotContains(t, srv.output(), password,
+				"启动日志泄露了数据库密码")
+
+			// Assert on the field rather than on a line position. An
+			// earlier version checked the first log line and broke as
+			// soon as another record was emitted before this one.
+			rec := srv.recordWithMsg(t, "server listening")
+			cfg, ok := rec["config"].(map[string]any)
+			require.True(t, ok, "config 应作为分组字段输出: %v", rec["config"])
+
+			logged, _ := cfg["database_url"].(string)
+			assert.Contains(t, logged, "xxxxx", "口令位置应是脱敏后的占位符")
+			assert.NotContains(t, logged, password)
+			// Host and database survive redaction, which is what makes
+			// the record useful for confirming where it connected.
+			assert.Contains(t, logged, "go_http_service")
+		})
+
+		// This is the assertion the whole step exists for. The ordering
+		// is produced by defer being LIFO while srv.Shutdown is an
+		// ordinary call, and it is the one part of the shutdown design
+		// that no unit test can demonstrate.
+		t.Run("关闭顺序：先排空请求再关连接池", func(t *testing.T) {
+			code := srv.terminate(t)
+			require.Equal(t, 0, code)
+
+			out := srv.output()
+			drained := strings.Index(out, "server stopped cleanly")
+			poolClosed := strings.Index(out, "closing database pool")
+
+			require.NotEqual(t, -1, drained, "没有找到排空完成的日志:\n%s", out)
+			require.NotEqual(t, -1, poolClosed, "没有找到关闭连接池的日志:\n%s", out)
+
+			assert.Less(t, drained, poolClosed,
+				"连接池在 HTTP 请求排空之前就关了，会切断仍在执行的查询")
+		})
+	})
+
+	t.Run("数据库连不上时拒绝启动", func(t *testing.T) {
+		cmd := exec.Command(bin)
+		// 192.0.2.1 是 RFC 5737 保留的不可路由地址。
+		cmd.Env = envWith(map[string]string{
+			"DATABASE_URL":       "postgres://app:pw@192.0.2.1:5432/db",
+			"DB_CONNECT_TIMEOUT": "500ms",
+		})
+
+		out, err := cmd.CombinedOutput()
+
+		require.Error(t, err, "连不上数据库必须以非零码退出，输出: %s", out)
+		assert.Contains(t, string(out), "database")
+		assert.NotContains(t, string(out), "pw@", "错误信息不该带连接串")
+	})
+}
+
+// passwordOf extracts the password from a URL-form DSN, or "" if there
+// is none to check.
+func passwordOf(t *testing.T, dsn string) string {
+	t.Helper()
+
+	u, err := url.Parse(dsn)
+	if err != nil || u.User == nil {
+		return ""
+	}
+	password, _ := u.User.Password()
+	return password
 }
 
 // buildServer compiles the package under test into a temporary binary.
@@ -372,10 +500,7 @@ func (s *server) records(t *testing.T) []map[string]any {
 	t.Helper()
 
 	var out []map[string]any
-	for _, line := range strings.Split(s.output(), "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
+	for _, line := range s.logLines(t) {
 		var rec map[string]any
 		if err := json.Unmarshal([]byte(line), &rec); err != nil {
 			continue // text-format runs, or a partial line
@@ -383,6 +508,39 @@ func (s *server) records(t *testing.T) []map[string]any {
 		out = append(out, rec)
 	}
 	return out
+}
+
+// logLines returns the non-empty lines emitted so far.
+func (s *server) logLines(t *testing.T) []string {
+	t.Helper()
+
+	var out []string
+	for _, line := range strings.Split(s.output(), "\n") {
+		if strings.TrimSpace(line) != "" {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// recordWithMsg waits for and returns the record carrying the given msg.
+// Looking a record up by name rather than by position keeps the
+// assertions stable when something else starts logging earlier.
+func (s *server) recordWithMsg(t *testing.T, msg string) map[string]any {
+	t.Helper()
+
+	var found map[string]any
+	require.Eventually(t, func() bool {
+		for _, rec := range s.records(t) {
+			if rec["msg"] == msg {
+				found = rec
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 20*time.Millisecond, "没有找到 msg=%q 的日志:\n%s", msg, s.output())
+
+	return found
 }
 
 // terminate sends SIGTERM and returns the exit code. Safe to call twice,
@@ -451,6 +609,7 @@ func envWith(overrides map[string]string) []string {
 		"READ_HEADER_TIMEOUT", "READ_TIMEOUT", "WRITE_TIMEOUT", "IDLE_TIMEOUT",
 		"SHUTDOWN_TIMEOUT", "REQUEST_TIMEOUT",
 		"MAX_BODY_BYTES", "LOG_LEVEL", "LOG_FORMAT",
+		"DATABASE_URL", "DB_MAX_CONNS", "DB_CONNECT_TIMEOUT",
 	}
 
 	drop := make(map[string]bool, len(managed))
