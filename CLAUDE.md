@@ -123,14 +123,59 @@ gofmt -l cmd internal && go vet ./... && go test -race ./...
 里含有 Go 内部结构体名（如 `EchoRequest`），且措辞随依赖版本变化。
 原始错误只写日志，对外返回稳定的错误码。`internal/handler/errors.go` 是翻译层。
 
+同样的规则适用于依赖检查：`/api/ready` 的检查失败时只返回通用原因，
+数据库驱动的错误里可能带主机名、用户名甚至密码。
+
+### 4.5 handler 是 `*API` 的方法，不是包级函数
+
+新增 handler 一律写成 `func (a *API) Xxx(c *gin.Context)`，放在
+`internal/handler/` 下与路由同名的文件里，并在 `router.go` 注册。
+
+依赖通过 `API` 结构体注入，不要新增包级变量。需要新依赖时加 `API` 字段，
+在 `handler.New()` 里接收，`cmd/server/main.go` 装配。
+
+时间一律用 `a.now()`，不要直接调 `time.Now()`——否则时间戳无法在测试里断言。
+
+### 4.6 会阻塞的调用必须接收 `c.Request.Context()`
+
+`REQUEST_TIMEOUT` 中间件把 deadline 放在请求 context 上。它**只传播 deadline，
+不代替 handler 写响应**（抢先写会和 handler 争 `ResponseWriter`，是数据竞争）。
+
+因此：**数据库查询、HTTP 调用、任何可能阻塞的操作，都必须把
+`c.Request.Context()` 传下去**，否则这个超时对它完全无效，一条慢查询
+会一直占着 goroutine。
+
+```go
+// 对
+rows, err := pool.Query(c.Request.Context(), sql, args...)
+
+// 错——超时管不到它
+rows, err := pool.Query(context.Background(), sql, args...)
+```
+
+### 4.7 日志用 `slog`，不要用 `log` 或 `fmt.Println`
+
+handler 内部用 `a.logFor(c)`，它返回带 `request_id` 的 logger，
+这样一条请求的所有日志能串起来。其他地方用 `a.log`。
+
+不要把查询串、请求体、凭据写进日志。
+
 ---
 
 ## 五、环境变量
+
+所有配置集中在 `internal/config`，启动时一次性读取并校验，非法值直接让进程退出。
+**不要在别处写 `os.Getenv`**——新增配置项就加 `Config` 字段并复用现有的
+`envString / envDuration / envInt64 / envLogLevel` 助手。
+
+完整列表见 `README.md` 的「环境变量」一节。最常用的几个：
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `PORT` | `8080` | 服务监听端口 |
 | `TRUSTED_PROXIES` | 空（谁都不信任） | 逗号分隔的可信代理 IP / CIDR |
+| `REQUEST_TIMEOUT` | `8s` | 单请求处理超时，必须小于 `WRITE_TIMEOUT` |
+| `LOG_LEVEL` / `LOG_FORMAT` | `info` / `json` | 日志级别与格式 |
 
 `TRUSTED_PROXIES` 留空时 `c.ClientIP()` 取 TCP 真实对端地址，客户端无法通过
 `X-Forwarded-For` 伪造自身 IP。只有确实部署在反向代理后面时才设置它。
@@ -140,16 +185,37 @@ gofmt -l cmd internal && go vet ./... && go test -race ./...
 ## 六、项目结构
 
 ```
-cmd/server/main.go          服务入口：超时配置、信号监听、优雅关闭
+cmd/server/main.go          装配依赖、构造 logger、信号监听、优雅关闭
+internal/config/            所有环境变量的读取与校验
 internal/handler/           HTTP 层
-  router.go                 路由注册、代理信任、404/405/panic 处理
-  health.go / info.go / echo.go
+  api.go                    API 结构体：依赖注入的载体
+  router.go                 路由注册、中间件顺序、404/405/panic
+  health.go                 /api/health  liveness，不查依赖
+  ready.go                  /api/ready   readiness，并发跑依赖检查
+  info.go / echo.go
   errors.go                 绑定错误 -> 统一错误响应的翻译层
-  middleware.go             请求体大小限制
-  clock.go                  可注入的时间源（便于测试）
+  requestid.go              Request ID 生成、校验、context 传递
+  logging.go                slog 访问日志中间件
+  middleware.go             请求体上限、单请求超时
 internal/model/             响应模型与错误码
 notes/                      中文学习笔记
 ```
+
+### 中间件顺序（改动前先读这段）
+
+`router.go` 里的注册顺序是有讲究的，改错会静默产生错误的日志：
+
+```
+requestID      →  最先，后续所有日志才带得上 ID
+requestLogger  →  紧随其后，才能量到完整耗时
+CustomRecovery →  在 logger 内层
+timeout        →  设置 deadline
+limitBodySize  →  最后
+```
+
+**Recovery 故意不放最外层**，这与 gin 的常规写法相反。若 Recovery 在最外层，
+handler panic 时异常会穿过 `requestLogger` 的 `c.Next()`，此时 Recovery 还没
+把状态码置为 500，访问日志会记成错误的状态码。
 
 ---
 
@@ -167,12 +233,30 @@ notes/                      中文学习笔记
 ## 八、后续核心方向
 
 1. ~~引入路由框架（Gin / chi）~~ 已完成
-2. 添加 PostgreSQL 数据库连接
-3. 实现用户注册 / 登录 / JWT 认证
-4. 添加日志、配置、错误处理模块
-5. 使用 Docker 容器化部署
-6. 尝试 Kubernetes 部署
+2. ~~接数据库前的地基：依赖注入、配置层、结构化日志、Request ID、请求超时、就绪探针~~ 已完成
+3. 添加 PostgreSQL 数据库连接
+4. 实现用户注册 / 登录 / JWT 认证
+5. 添加配置与错误处理模块的补充
+6. 使用 Docker 容器化部署
+7. 尝试 Kubernetes 部署
 
-> 在做第 2 步之前，建议先把 handler 改成结构体 + 依赖注入
-> （目前是包级函数，拿不到连接池）。理由与具体做法见
-> `notes/代码审查问题清单与改进计划.md` 第六节。
+### 接 PostgreSQL 时具体要做什么
+
+地基已经就位，剩下三件事：
+
+1. **`internal/config`**：加 `DatabaseURL` 等字段，复用现有 env 助手
+2. **`internal/db/db.go`**：建连接池，返回 `*pgxpool.Pool`（或 `*sql.DB`）
+3. **`cmd/server/main.go`**：
+   ```go
+   pool, err := db.Connect(ctx, cfg)
+   if err != nil { return fmt.Errorf("database: %w", err) }
+   defer pool.Close()   // 必须写在 srv.Shutdown 之前，见 main.go 注释
+
+   api := handler.New(cfg, logger,
+       handler.WithReadyCheck("database", pool.Ping))
+   ```
+4. **`internal/repository` / `internal/service`**：按
+   `notes/分层架构.md` 的四层结构新建，Handler → Service → Repository，不得反向依赖
+
+关闭顺序不能颠倒：**先排空 HTTP 请求，再关连接池**。
+反过来会切断正在执行的查询。`main.go` 的注释里写明了 defer 的书写位置为何如此。
