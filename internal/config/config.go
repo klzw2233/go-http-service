@@ -177,16 +177,22 @@ func (c *Config) Addr() string { return ":" + c.Port }
 //
 // It exists so startup can log the effective settings. When database
 // credentials are added, redact them here rather than at each call site.
+//
+// Durations are rendered as strings ("5s") rather than with
+// slog.Duration, which a JSON handler emits as a nanosecond integer.
+// This value is a config dump read by a human deciding whether the
+// deployment picked up the right settings, and 5000000000 does not
+// answer that question at a glance.
 func (c *Config) LogValue() slog.Value {
 	return slog.GroupValue(
 		slog.String("port", c.Port),
 		slog.Any("trusted_proxies", c.TrustedProxies),
-		slog.Duration("read_header_timeout", c.ReadHeaderTimeout),
-		slog.Duration("read_timeout", c.ReadTimeout),
-		slog.Duration("write_timeout", c.WriteTimeout),
-		slog.Duration("idle_timeout", c.IdleTimeout),
-		slog.Duration("shutdown_timeout", c.ShutdownTimeout),
-		slog.Duration("request_timeout", c.RequestTimeout),
+		slog.String("read_header_timeout", c.ReadHeaderTimeout.String()),
+		slog.String("read_timeout", c.ReadTimeout.String()),
+		slog.String("write_timeout", c.WriteTimeout.String()),
+		slog.String("idle_timeout", c.IdleTimeout.String()),
+		slog.String("shutdown_timeout", c.ShutdownTimeout.String()),
+		slog.String("request_timeout", c.RequestTimeout.String()),
 		slog.Int64("max_body_bytes", c.MaxBodyBytes),
 		slog.String("log_level", c.LogLevel.String()),
 		slog.String("log_format", c.LogFormat),

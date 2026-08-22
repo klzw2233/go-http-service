@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	"encoding/json"
 	"log/slog"
 	"strings"
 	"testing"
@@ -224,4 +226,38 @@ func TestLogValueRedactsNothingYet(t *testing.T) {
 	} {
 		assert.True(t, found[key], "LogValue 缺少字段 %q", key)
 	}
+}
+
+// TestLogValueRendersDurationsReadably pins the choice of strings over
+// slog.Duration. A JSON handler renders slog.Duration as a nanosecond
+// integer, and "read_header_timeout":5000000000 does not tell a human
+// scanning the startup log whether the deployment picked up the right
+// timeout.
+func TestLogValueRendersDurationsReadably(t *testing.T) {
+	setEnv(t, map[string]string{
+		"READ_HEADER_TIMEOUT": "5s",
+		"REQUEST_TIMEOUT":     "1500ms",
+		"IDLE_TIMEOUT":        "2m",
+	})
+
+	cfg, err := Load()
+	require.NoError(t, err)
+
+	var buf bytes.Buffer
+	slog.New(slog.NewJSONHandler(&buf, nil)).Info("startup", "config", cfg)
+
+	var record struct {
+		Config map[string]any `json:"config"`
+	}
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &record),
+		"日志不是合法 JSON: %s", buf.String())
+
+	assert.Equal(t, "5s", record.Config["read_header_timeout"])
+	assert.Equal(t, "1.5s", record.Config["request_timeout"])
+	assert.Equal(t, "2m0s", record.Config["idle_timeout"])
+	assert.Equal(t, DefaultWriteTimeout.String(), record.Config["write_timeout"])
+
+	// Non-duration fields keep their natural types.
+	assert.Equal(t, float64(DefaultMaxBodyBytes), record.Config["max_body_bytes"])
+	assert.Equal(t, DefaultPort, record.Config["port"])
 }
