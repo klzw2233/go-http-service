@@ -3,6 +3,8 @@ package repository
 import (
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"strings"
 	"sync"
@@ -14,6 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"go-http-service/internal/db"
 	"go-http-service/internal/model"
 )
 
@@ -27,10 +30,16 @@ func uniqueName(prefix string) string {
 	return fmt.Sprintf("%s%d", prefix, nameCounter.Add(1))
 }
 
-// testPool connects to the test database, or skips.
+// testPool connects to the test database, applies migrations, or skips.
 //
 // Database-backed tests are opt-in via TEST_DATABASE_URL so that
 // `go test ./...` stays green without PostgreSQL installed. CI sets it.
+//
+// Migrations run here rather than being assumed: `go test ./...` runs
+// each package's binary concurrently, so there is no ordering guarantee
+// that internal/db or cmd/server created the schema first. Migrate is
+// idempotent and serialised by an advisory lock, so several packages
+// calling it at once is safe.
 func testPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 
@@ -47,6 +56,9 @@ func testPool(t *testing.T) *pgxpool.Pool {
 	require.NoError(t, err)
 	require.NoError(t, pool.Ping(t.Context()))
 	t.Cleanup(pool.Close)
+
+	require.NoError(t, db.Migrate(t.Context(), pool,
+		slog.New(slog.NewJSONHandler(io.Discard, nil))))
 
 	return pool
 }

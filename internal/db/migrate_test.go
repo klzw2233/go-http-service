@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
@@ -114,7 +115,7 @@ func TestMigrate_ReleasesLock(t *testing.T) {
 
 	require.NoError(t, Migrate(ctx, pool, discardLogger()))
 
-	// The check has to come from a different session. Advisory locks are
+	// The probe has to come from a different session. Advisory locks are
 	// re-entrant within the session that holds them, so asking the same
 	// pool would succeed even if the lock had leaked.
 	other := migrateTestPool(t)
@@ -123,15 +124,25 @@ func TestMigrate_ReleasesLock(t *testing.T) {
 	require.NoError(t, err)
 	defer conn.Release()
 
+	// Eventually, not a single attempt.
+	//
+	// `go test ./...` runs each package's binary concurrently, and
+	// cmd/server's end-to-end tests start real servers that migrate
+	// against this same database. So the lock being held at any given
+	// instant is legitimate. What this test rules out is a lock held
+	// forever, which is what a leak looks like and what would wedge the
+	// next deployment.
 	var acquired bool
-	require.NoError(t, conn.QueryRow(ctx,
-		"SELECT pg_try_advisory_lock($1)", migrationLockID).Scan(&acquired))
+	require.Eventually(t, func() bool {
+		if err := conn.QueryRow(ctx,
+			"SELECT pg_try_advisory_lock($1)", migrationLockID).Scan(&acquired); err != nil {
+			return false
+		}
+		return acquired
+	}, 20*time.Second, 100*time.Millisecond,
+		"advisory lock 始终无法获取，说明迁移结束后没有释放它")
 
-	assert.True(t, acquired, "迁移结束后 advisory lock 必须已释放，否则下次部署会卡死")
-
-	if acquired {
-		_, _ = conn.Exec(ctx, "SELECT pg_advisory_unlock($1)", migrationLockID)
-	}
+	_, _ = conn.Exec(ctx, "SELECT pg_advisory_unlock($1)", migrationLockID)
 }
 
 func TestPendingMigrations_SkipsApplied(t *testing.T) {
