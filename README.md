@@ -1,7 +1,8 @@
 # Go HTTP Service
 
-> Backend Engineer 学习路线的第一个实战项目：从零搭建一个最小化的 Go HTTP 服务。
-> 当前版本已引入 Gin 框架，并按分层架构组织代码。
+> Backend Engineer 学习路线的第一个实战项目：从零搭建一个 Go HTTP 服务。
+> 当前已完成接入数据库前的全部地基——依赖注入、集中配置、结构化日志、
+> 请求关联 ID、单请求超时、存活/就绪双探针，并有 CI 与端到端测试保障。
 
 ---
 
@@ -10,8 +11,24 @@
 建立一个可用于后续项目演进的 Go 后端服务基础骨架：
 
 - 使用 [Gin](https://github.com/gin-gonic/gin) Web 框架启动 HTTP 服务
-- 按分层架构组织代码
-- 为后续添加 REST API、数据库、中间件等能力打下基础
+- 按分层架构组织代码，依赖通过构造函数注入而非包级变量
+- 对外契约稳定：统一的错误响应结构，绝不泄露内部实现细节
+- 具备生产服务的基本要素：超时、优雅关闭、结构化日志、探针
+- 为下一步接入 PostgreSQL 铺好路（见文末「下一步计划」）
+
+### 已完成的能力
+
+| 能力 | 说明 |
+|------|------|
+| 依赖注入 | handler 是 `*API` 的方法，依赖由 `handler.New()` 注入 |
+| 配置集中管理 | 全部环境变量在 `internal/config` 读取并校验，非法值拒绝启动 |
+| 结构化日志 | `log/slog`，JSON / text 可切换，级别随状态码变化 |
+| 请求关联 ID | `X-Request-Id`，注入 `context`，客户端传入值经过校验 |
+| 两层超时 | `http.Server` 四项 + 单请求 `REQUEST_TIMEOUT` |
+| 优雅关闭 | `SIGINT` / `SIGTERM` 排空在途请求后退出 |
+| 探针分级 | `/api/health` 存活、`/api/ready` 就绪（可挂依赖检查） |
+| 安全默认 | 不信任任何代理、请求体上限、panic 不泄露堆栈 |
+| 测试 | 单元 + 端到端（启动真实进程走真实 TCP），CI 跑竞态检测 |
 
 ---
 
@@ -21,10 +38,13 @@
 go-http-service/
 ├── cmd/
 │   └── server/
-│       └── main.go              # 装配依赖、构造 logger、信号监听、优雅关闭
+│       ├── main.go              # 装配依赖、构造 logger、信号监听、优雅关闭
+│       ├── main_test.go         # newLogger 的格式与级别
+│       └── e2e_test.go          # 端到端：编译并启动真实进程，走真实 TCP
 ├── internal/
 │   ├── config/
-│   │   └── config.go            # 所有环境变量的读取与校验
+│   │   ├── config.go            # 所有环境变量的读取与校验
+│   │   └── config_test.go
 │   ├── handler/
 │   │   ├── api.go               # API 结构体：依赖注入的载体
 │   │   ├── router.go            # 路由注册、中间件顺序、404/405/panic
@@ -35,24 +55,35 @@ go-http-service/
 │   │   ├── errors.go            # 绑定错误 -> 统一错误响应的翻译层
 │   │   ├── requestid.go         # Request ID 生成、校验、context 传递
 │   │   ├── logging.go           # slog 访问日志中间件
-│   │   └── middleware.go        # 请求体上限、单请求超时
+│   │   ├── middleware.go        # 请求体上限、单请求超时
+│   │   ├── main_test.go         # TestMain、测试夹具与请求助手
+│   │   ├── handler_test.go      # 四个接口、路由、错误契约
+│   │   ├── middleware_test.go   # Request ID、超时、日志中间件
+│   │   └── ready_test.go        # 就绪检查：并发、失败、panic、不泄露
 │   └── model/
 │       ├── health.go            # HealthResponse
 │       ├── ready.go             # ReadyResponse、CheckResult
 │       ├── info.go              # InfoResponse、服务名与版本号
 │       ├── echo.go              # EchoRequest, EchoResponse
-│       └── error.go             # ErrorResponse、错误码常量
-├── notes/                       # 学习笔记
-├── .github/workflows/ci.yml     # CI：gofmt / vet / build / race test
+│       ├── error.go             # ErrorResponse、错误码常量
+│       └── model_test.go
+├── notes/                       # 中文学习笔记
+├── .github/workflows/ci.yml     # CI：换行符 / gofmt / vet / build / race / tidy
 ├── .gitattributes               # 换行符规范（LF）
+├── CLAUDE.md                    # 项目环境与开发约定
 ├── go.mod                       # Go 模块定义
 ├── go.sum                       # 依赖校验和
 └── README.md                    # 项目说明
 ```
 
-> 依赖注入说明：handler 是 `*API` 的方法而非包级函数，`API` 持有配置、
+> **依赖注入**：handler 是 `*API` 的方法而非包级函数，`API` 持有配置、
 > logger、时间源。接入 PostgreSQL 时，连接池作为 `API` 的又一个字段传入，
-> 不需要再动路由和 handler 的结构。
+> 路由和其他 handler 一行都不用改。
+
+> **为什么有 `e2e_test.go`**：单元测试在 `TestMain` 里设了 `gin.TestMode`，
+> 观察不到真实进程用的运行模式。这个测试编译出真正的二进制、在真实端口上
+> 启动、发真实 SIGTERM——它上线第一次运行就发现服务跑在 gin debug 模式、
+> 把非 JSON 的警告混进了结构化日志流。
 
 ---
 
@@ -77,11 +108,19 @@ PORT=9000 go run cmd/server/main.go
 ```
 
 服务收到 `Ctrl+C`（SIGINT）或 `SIGTERM` 时会优雅关闭：停止接收新连接，
-等待在途请求处理完毕（最多 15 秒）后再退出。
+等待在途请求处理完毕后再退出。等待上限默认 15 秒，由 `SHUTDOWN_TIMEOUT` 控制。
+排空期间再按一次 `Ctrl+C` 会立即强制退出。
+
+配置有误时进程**不会带着默认值启动**，而是立即失败并说明原因：
+
+```bash
+$ PORT=abc go run cmd/server/main.go
+server stopped with an error  error="config: PORT must be a number, got \"abc\""
+```
 
 ### 3. 测试接口
 
-#### 健康检查
+#### 存活探针
 
 ```bash
 curl http://localhost:8080/api/health
@@ -92,6 +131,21 @@ curl http://localhost:8080/api/health
 ```json
 {"status":"ok","timestamp":"..."}
 ```
+
+#### 就绪探针
+
+```bash
+curl -i http://localhost:8080/api/ready
+```
+
+预期返回 `200`，当前尚未接入任何依赖，因此检查列表为空：
+
+```json
+{"status":"ready","timestamp":"...","checks":[]}
+```
+
+任一依赖检查失败时会返回 `503`，`status` 变为 `not_ready`。
+两个探针的区别见下文「health 与 ready 的区别」。
 
 #### 服务信息
 
@@ -146,16 +200,16 @@ go build -ldflags "-X go-http-service/internal/model.Version=$(git describe --ta
 go test ./...
 ```
 
-显示详细输出：
-
-```bash
-go test -v ./...
-```
-
 只运行某个测试：
 
 ```bash
 go test -v ./internal/handler -run TestEchoEndpoint
+```
+
+竞态检测（测试里用了 `t.Parallel`，就绪检查还会并发扇出，**提交前必须跑**）：
+
+```bash
+go test -race ./...
 ```
 
 查看覆盖率：
@@ -164,13 +218,33 @@ go test -v ./internal/handler -run TestEchoEndpoint
 go test -cover ./...
 ```
 
-竞态检测（测试中使用了 `t.Parallel`，建议提交前跑一次）：
+当前覆盖率（2026-08-23 实测）：
+
+| 包 | 覆盖率 |
+|----|--------|
+| `internal/model` | 100.0% |
+| `internal/config` | 96.6% |
+| `internal/handler` | 92.5% |
+| `cmd/server` | 17.1%（主体是 `run()` 的启动流程，由端到端测试覆盖） |
+
+#### 端到端测试
+
+`cmd/server/e2e_test.go` 会**编译出真实二进制并作为进程启动**，在真实端口上
+用真实 HTTP 客户端发请求，最后发真实 `SIGTERM`。它覆盖单元测试碰不到的部分：
+启动日志格式、配置解析、信号处理、进程退出码。
 
 ```bash
-go test -race ./...
+go test ./cmd/server -run TestEndToEnd -v
 ```
 
-当前覆盖率：`internal/model` 100%，`internal/handler` 82.9%。
+它会编译，比单元测试慢几秒。急着跑单元测试时可以跳过：
+
+```bash
+go test -short ./...
+```
+
+> 注意：Go 会缓存测试结果。改了非测试代码后想看真实输出，加 `-count=1`
+> 强制重跑，否则可能看到的是上一次的缓存结果。
 
 ---
 
@@ -255,10 +329,10 @@ go test -race ./...
 
 ### 请求体限制
 
-| 限制 | 取值 | 说明 |
-|------|------|------|
-| 请求体总大小 | 1 MiB | 由 `limitBodySize` 中间件对全局路由生效 |
-| `/api/echo` 的 `message` 长度 | 4096 字符 | 由 binding tag `max=4096` 约束 |
+| 限制 | 默认值 | 说明 |
+|------|--------|------|
+| 请求体总大小 | 1 MiB | 由 `limitBodySize` 中间件对全局路由生效，可用 `MAX_BODY_BYTES` 调整 |
+| `/api/echo` 的 `message` 长度 | 4096 字符 | 由 binding tag `max=4096` 约束，按**字符**而非字节计 |
 
 ---
 
@@ -292,6 +366,15 @@ server stopped with an error  error="config: PORT must be a number, got \"abc\""
 | `MAX_BODY_BYTES` | `1048576` | 请求体大小上限（1 MiB） |
 | `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 | `LOG_FORMAT` | `json` | `json` 或 `text` |
+| `GIN_MODE` | 未设置时按 `release` 运行 | 由 gin 自身读取，见下 |
+
+关于 `GIN_MODE`：gin 的 debug 模式会把路由表和警告**直接打到 stdout**，
+那些行不是 JSON，会混进结构化日志流让按行解析的采集器失败。因此本服务在
+`GIN_MODE` 未设置时主动切到 `release`。想看 gin 的调试输出就显式设置
+`GIN_MODE=debug`，它优先于默认行为。
+
+> 这个问题是端到端测试上线第一次运行时发现的。单元测试发现不了——
+> `TestMain` 里设了 `gin.TestMode`，观察不到真实进程用的模式。
 
 关于 `TRUSTED_PROXIES`：gin 默认信任**所有**代理，这会让 `c.ClientIP()`
 无条件采信客户端自己发来的 `X-Forwarded-For` 头，即客户端可以随意伪造自身 IP。
@@ -337,10 +420,26 @@ handler 的 deadline 永远没机会生效。配置校验会拒绝违反此约�
 
 ## 日志
 
-使用标准库 `log/slog`，默认输出 JSON，每个请求一条访问日志：
+使用标准库 `log/slog`，默认输出 JSON。
+
+启动时打印一条包含全部生效配置的记录，用来确认部署真的读到了预期的值：
 
 ```json
-{"time":"2026-08-22T12:00:00Z","level":"INFO","msg":"request","method":"GET",
+{"time":"2026-08-23T00:20:26+08:00","level":"INFO","msg":"server listening",
+ "addr":":8080","config":{"port":"8080","trusted_proxies":null,
+ "read_header_timeout":"5s","read_timeout":"10s","write_timeout":"10s",
+ "idle_timeout":"1m0s","shutdown_timeout":"15s","request_timeout":"8s",
+ "max_body_bytes":1048576,"log_level":"INFO","log_format":"json"}}
+```
+
+> 时长渲染成 `"5s"` 而不是 `slog.Duration` 默认的纳秒整数 `5000000000`。
+> 这条记录是给人看的，十位数的整数没法一眼看出配置对不对。
+> 非时长字段保持原本类型，`max_body_bytes` 仍是数字，还能做数值比较。
+
+每个请求一条访问日志：
+
+```json
+{"time":"2026-08-23T00:20:27+08:00","level":"INFO","msg":"request","method":"GET",
  "path":"/api/health","status":200,"duration_ms":0,"client_ip":"127.0.0.1",
  "bytes":58,"request_id":"3f2a...c81"}
 ```
@@ -355,14 +454,61 @@ handler 的 deadline 永远没机会生效。配置校验会拒绝违反此约�
 `c.Request.Context()`，后续的数据库查询可以直接携带它。
 
 客户端可以自带 `X-Request-Id` 以支持跨服务链路追踪，但**会先做校验**：
-长度须 ≤ 64 且仅含 `[A-Za-z0-9_-]`。不合规就丢弃并重新生成——
-否则客户端可以往日志里注入换行、控制字符或伪造的 JSON 字段。
+长度须 ≤ 64 且仅含 `[A-Za-z0-9_-]`。不合规就丢弃并重新生成。
+
+原因是这个值会被原样写进该请求的每一条日志。若不校验，客户端可以发送
+
+```
+X-Request-Id: x","level":"ERROR","msg":"payment approved
+```
+
+在你的日志里伪造出一条不存在的记录。
+
+> 换行注入不在此列：HTTP 协议本身就用换行分隔头部，所以换行到不了字段值里
+> （Go 的客户端更是直接拒绝发送这种头）。真正能穿过 HTTP 层的是引号、
+> 花括号和制表符这类在头部值里合法的字符，那才是这条校验要挡的东西。
+> 端到端测试逐个验证了这些载荷。
 
 ---
 
 ## 下一步计划
 
-1. 连接 PostgreSQL 数据库
-2. 实现用户注册/登录接口
-3. 添加中间件（日志、恢复、CORS）
-4. 使用 Docker 容器化部署
+接数据库前的地基已经完成（见 `notes/接入数据库前的地基.md`），
+接入 PostgreSQL 时只剩三件事：
+
+1. `internal/config` 加 `DatabaseURL` 等字段，复用现有的 env 读取助手
+2. 新建 `internal/db/db.go` 建连接池
+3. `cmd/server/main.go` 装配：
+
+```go
+pool, err := db.Connect(ctx, cfg)
+if err != nil {
+    return fmt.Errorf("database: %w", err)
+}
+defer pool.Close()   // 必须写在 srv.Shutdown 之前注册，否则会切断在执行的查询
+
+api := handler.New(cfg, logger,
+    handler.WithReadyCheck("database", pool.Ping))   // 挂到 /api/ready
+```
+
+然后按 `notes/分层架构.md` 建 `internal/repository` 和 `internal/service`，
+依赖方向 Handler → Service → Repository，不得反向。
+
+### 之后
+
+1. 实现用户注册 / 登录 / JWT 认证
+2. 补充中间件：CORS、限流、安全响应头
+3. 使用 Docker 容器化部署
+4. 尝试 Kubernetes 部署（`/api/health` 与 `/api/ready` 已可直接对接探针）
+
+---
+
+## 相关笔记
+
+| 笔记 | 内容 |
+|------|------|
+| `notes/接入数据库前的地基.md` | 本轮六项改造的完整推导与取舍 |
+| `notes/代码审查问题清单与改进计划.md` | 上一轮代码审查的 15 个问题与修复记录 |
+| `notes/分层架构.md` | 四层架构与依赖方向 |
+| `notes/连接 PostgreSQL 数据库.md` | 驱动选择、连接池、迁移工具 |
+| `notes/添加中间件.md` | 中间件原理与注册顺序 |
