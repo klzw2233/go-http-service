@@ -23,6 +23,10 @@ const (
 	// HTTP method.
 	ErrCodeMethodNotAllowed ErrorCode = "METHOD_NOT_ALLOWED"
 
+	// ErrCodeConflict means the request collided with existing state,
+	// such as registering a username somebody already holds.
+	ErrCodeConflict ErrorCode = "CONFLICT"
+
 	// ErrCodeInternal means the request failed for a reason the client
 	// cannot act on. Details go to the server log only.
 	ErrCodeInternal ErrorCode = "INTERNAL_ERROR"
