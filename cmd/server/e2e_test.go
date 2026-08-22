@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,21 +18,34 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// testDSN is the connection string every started server receives. It is
+// package state rather than a parameter because startServer is called
+// from a dozen places and the database is now required by all of them.
+var testDSN string
 
 // TestEndToEnd builds the real binary, runs it as a real process, and
 // drives it over a real TCP connection.
 //
 // Everything here is also covered by unit tests against httptest, but
 // those never exercise the actual wiring: config parsing from the
-// environment, the logger reaching stdout, signal handling, and the
-// process exit code. This is the check that the thing you deploy works,
-// not just that the packages do.
+// environment, migrations, the logger reaching stdout, signal handling,
+// and the process exit code. This is the check that the thing you deploy
+// works, not just that the packages do.
 func TestEndToEnd(t *testing.T) {
 	if testing.Short() {
 		t.Skip("端到端测试需要编译并启动进程，-short 时跳过")
+	}
+
+	// The service refuses to start without a database now that it has
+	// endpoints backed by one, so the whole suite needs a real instance.
+	testDSN = os.Getenv("TEST_DATABASE_URL")
+	if testDSN == "" {
+		t.Skip("TEST_DATABASE_URL 未设置：服务已要求数据库才能启动，跳过端到端测试")
 	}
 
 	bin := buildServer(t)
@@ -70,13 +84,18 @@ func TestEndToEnd(t *testing.T) {
 			assert.Contains(t, body, `"status":"ok"`)
 		})
 
-		t.Run("ready 无依赖时返回 200 与空数组", func(t *testing.T) {
+		t.Run("ready 返回 200 并报告数据库依赖", func(t *testing.T) {
 			resp, body := srv.get(t, "/api/ready")
 
 			assert.Equal(t, http.StatusOK, resp.StatusCode)
 			assert.Contains(t, body, `"status":"ready"`)
-			assert.Contains(t, body, `"checks":[]`,
-				"没有依赖时应是空数组而不是 null")
+			assert.Contains(t, body, `"name":"database"`,
+				"数据库已是必需依赖，就绪探针必须报告它")
+
+			// The "empty checks serialise as [] rather than null"
+			// property moved to internal/handler's
+			// TestReady_NoChecksRegistered: a running server always has
+			// the database check now, so it cannot be observed here.
 		})
 
 		t.Run("每个响应都带 X-Request-Id", func(t *testing.T) {
@@ -220,6 +239,13 @@ func TestEndToEnd(t *testing.T) {
 				},
 				wantMsg: "must be shorter than WRITE_TIMEOUT",
 			},
+			{
+				// Became required once endpoints started reading and
+				// writing the database; it was optional before that.
+				name:    "缺少数据库连接串",
+				env:     map[string]string{"DATABASE_URL": ""},
+				wantMsg: "DATABASE_URL is required",
+			},
 		}
 
 		for _, tt := range tests {
@@ -249,12 +275,8 @@ func TestEndToEnd(t *testing.T) {
 	})
 
 	t.Run("带数据库", func(t *testing.T) {
-		dsn := os.Getenv("TEST_DATABASE_URL")
-		if dsn == "" {
-			t.Skip("TEST_DATABASE_URL 未设置，跳过需要真实数据库的端到端测试")
-		}
-
-		srv := startServer(t, bin, map[string]string{"DATABASE_URL": dsn})
+		dsn := testDSN
+		srv := startServer(t, bin, nil)
 
 		t.Run("ready 报告 database 检查为 ok", func(t *testing.T) {
 			resp, body := srv.get(t, "/api/ready")
@@ -330,6 +352,86 @@ func TestEndToEnd(t *testing.T) {
 		})
 	})
 
+	// The first vertical slice: HTTP through service and repository to
+	// SQL and back. Unit tests cover each layer with the next one
+	// stubbed; only this proves they fit together.
+	t.Run("注册接口", func(t *testing.T) {
+		srv := startServer(t, bin, nil)
+
+		username := fmt.Sprintf("e2e%d", time.Now().UnixNano())
+		cleanupUsers(t, username)
+
+		email := username + "@example.com"
+		body := fmt.Sprintf(
+			`{"username":%q,"email":%q,"password":"correct-horse-battery"}`, username, email)
+
+		var created struct {
+			ID        int64     `json:"id"`
+			Username  string    `json:"username"`
+			Email     string    `json:"email"`
+			CreatedAt time.Time `json:"created_at"`
+		}
+
+		t.Run("注册成功返回 201", func(t *testing.T) {
+			resp, raw := srv.post(t, "/api/users", body)
+
+			require.Equal(t, http.StatusCreated, resp.StatusCode, "body: %s", raw)
+			require.NoError(t, json.Unmarshal([]byte(raw), &created))
+
+			assert.Positive(t, created.ID, "id 应由数据库生成")
+			assert.Equal(t, username, created.Username)
+			assert.Equal(t, email, created.Email)
+			assert.False(t, created.CreatedAt.IsZero())
+		})
+
+		t.Run("响应不含任何密码材料", func(t *testing.T) {
+			_, raw := srv.post(t, "/api/users",
+				fmt.Sprintf(`{"username":"%s2","email":"2%s","password":"correct-horse-battery"}`,
+					username, email))
+
+			for _, leak := range []string{"password", "$2a$", "correct-horse-battery"} {
+				assert.NotContains(t, raw, leak, "响应泄露了 %q: %s", leak, raw)
+			}
+		})
+
+		t.Run("重复用户名返回 409", func(t *testing.T) {
+			resp, raw := srv.post(t, "/api/users", body)
+
+			require.Equal(t, http.StatusConflict, resp.StatusCode, "body: %s", raw)
+			assert.Contains(t, raw, `"code":"CONFLICT"`)
+		})
+
+		// Proves the functional unique index on lower(username) reaches
+		// all the way out to the HTTP contract.
+		t.Run("大小写不同的同名也返回 409", func(t *testing.T) {
+			upper := fmt.Sprintf(
+				`{"username":%q,"email":"upper-%s","password":"correct-horse-battery"}`,
+				strings.ToUpper(username), email)
+
+			resp, raw := srv.post(t, "/api/users", upper)
+
+			require.Equal(t, http.StatusConflict, resp.StatusCode, "body: %s", raw)
+		})
+
+		t.Run("校验失败返回 400 且不泄露内部细节", func(t *testing.T) {
+			resp, raw := srv.post(t, "/api/users", `{"username":"ab","email":"nope","password":"x"}`)
+
+			require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+			assert.Contains(t, raw, `"code":"VALIDATION_FAILED"`)
+			for _, leak := range []string{"CreateUserRequest", "struct", "Key:"} {
+				assert.NotContains(t, raw, leak)
+			}
+		})
+
+		t.Run("迁移已在启动时执行", func(t *testing.T) {
+			rec := srv.recordWithMsg(t, "server listening")
+			require.NotNil(t, rec)
+			// A successful registration above already proves the users
+			// table exists; this just confirms the server got that far.
+			assert.Equal(t, "INFO", rec["level"])
+		})
+	})
+
 	t.Run("数据库连不上时拒绝启动", func(t *testing.T) {
 		cmd := exec.Command(bin)
 		// 192.0.2.1 是 RFC 5737 保留的不可路由地址。
@@ -380,6 +482,10 @@ type server struct {
 	mu   sync.Mutex
 	logs strings.Builder
 
+	// logsDone closes when the stdout scanner reaches EOF, which happens
+	// once the process exits and closes its end of the pipe.
+	logsDone chan struct{}
+
 	stopped bool
 }
 
@@ -390,7 +496,12 @@ func startServer(t *testing.T, bin string, env map[string]string) *server {
 
 	port := freePort(t)
 
-	full := map[string]string{"PORT": port}
+	full := map[string]string{
+		"PORT": port,
+		// Required for the process to start at all. A caller can still
+		// override it, which is how the unreachable-database case works.
+		"DATABASE_URL": testDSN,
+	}
 	for k, v := range env {
 		full[k] = v
 	}
@@ -404,10 +515,12 @@ func startServer(t *testing.T, bin string, env map[string]string) *server {
 
 	require.NoError(t, cmd.Start())
 
-	s := &server{port: port, cmd: cmd}
+	s := &server{port: port, cmd: cmd, logsDone: make(chan struct{})}
 
 	// Drain the pipe continuously; a full pipe would block the process.
 	go func() {
+		defer close(s.logsDone)
+
 		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
 			s.mu.Lock()
@@ -476,6 +589,46 @@ func (s *server) output() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.logs.String()
+}
+
+// post sends a JSON body and returns the response with its text.
+func (s *server) post(t *testing.T, path, body string) (*http.Response, string) {
+	t.Helper()
+
+	req, err := http.NewRequest(http.MethodPost, s.url(path), strings.NewReader(body))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	raw, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	return resp, string(raw)
+}
+
+// cleanupUsers removes the accounts a test created. The development
+// database is long-lived, so without this every run leaves rows behind.
+func cleanupUsers(t *testing.T, prefix string) {
+	t.Helper()
+
+	t.Cleanup(func() {
+		ctx := context.WithoutCancel(t.Context())
+
+		pool, err := pgxpool.New(ctx, testDSN)
+		if err != nil {
+			t.Logf("清理测试用户失败（连接）: %v", err)
+			return
+		}
+		defer pool.Close()
+
+		if _, err := pool.Exec(ctx,
+			`DELETE FROM users WHERE username LIKE $1`, prefix+"%"); err != nil {
+			t.Logf("清理测试用户失败（删除）: %v", err)
+		}
+	})
 }
 
 // firstLogLine returns the startup record, waiting for it to appear.
@@ -560,24 +713,29 @@ func (s *server) terminate(t *testing.T) int {
 		return -1
 	}
 
-	done := make(chan error, 1)
-	go func() { done <- s.cmd.Wait() }()
-
+	// Wait for the scanner to hit EOF BEFORE calling cmd.Wait.
+	//
+	// os/exec closes the pipe returned by StdoutPipe as soon as Wait
+	// sees the process exit, so calling Wait first races the reader and
+	// silently truncates whatever the process logged on its way out.
+	// That is exactly the shutdown sequence this suite asserts on, and
+	// it passed for a while only because there was less to write.
 	select {
-	case err := <-done:
-		if err == nil {
-			return 0
-		}
+	case <-s.logsDone:
+	case <-time.After(20 * time.Second):
+		_ = s.cmd.Process.Kill()
+		t.Fatal("日志管道在 20s 内没有关闭")
+		return -1
+	}
+
+	if err := s.cmd.Wait(); err != nil {
 		var exitErr *exec.ExitError
-		if ok := asExitError(err, &exitErr); ok {
+		if asExitError(err, &exitErr) {
 			return exitErr.ExitCode()
 		}
 		return -1
-	case <-time.After(20 * time.Second):
-		_ = s.cmd.Process.Kill()
-		t.Fatal("服务在 20s 内没有退出")
-		return -1
 	}
+	return 0
 }
 
 func asExitError(err error, target **exec.ExitError) bool {
@@ -617,13 +775,18 @@ func envWith(overrides map[string]string) []string {
 		drop[k] = true
 	}
 
-	env := make([]string, 0, len(os.Environ())+len(overrides))
+	env := make([]string, 0, len(os.Environ())+len(overrides)+1)
 	for _, kv := range os.Environ() {
 		if key, _, ok := strings.Cut(kv, "="); ok && drop[key] {
 			continue
 		}
 		env = append(env, kv)
 	}
+
+	// Seeded before the overrides so a case can blank it to exercise the
+	// missing-database path.
+	env = append(env, "DATABASE_URL="+testDSN)
+
 	for k, v := range overrides {
 		env = append(env, k+"="+v)
 	}

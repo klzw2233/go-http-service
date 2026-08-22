@@ -24,14 +24,25 @@ var envVars = []string{
 	"DATABASE_URL", "DB_MAX_CONNS", "DB_CONNECT_TIMEOUT",
 }
 
-// setEnv clears every known variable, then applies the given overrides.
-// t.Setenv restores the previous values, and forbids t.Parallel.
+// testDSN is a syntactically valid connection string. It is seeded by
+// setEnv because DATABASE_URL is required, so a test that does not care
+// about the database still needs one to reach the assertions it does
+// care about.
+const testDSN = "postgres://app:pw@db:5432/svc"
+
+// setEnv clears every known variable, seeds the required ones, then
+// applies the given overrides. t.Setenv restores the previous values,
+// and forbids t.Parallel.
+//
+// Pass DATABASE_URL: "" in overrides to test the missing-database case.
 func setEnv(t *testing.T, overrides map[string]string) {
 	t.Helper()
 
 	for _, k := range envVars {
 		t.Setenv(k, "")
 	}
+	t.Setenv("DATABASE_URL", testDSN)
+
 	for k, v := range overrides {
 		t.Setenv(k, v)
 	}
@@ -54,7 +65,7 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, DefaultMaxBodyBytes, cfg.MaxBodyBytes)
 	assert.Equal(t, DefaultLogLevel, cfg.LogLevel)
 	assert.Equal(t, DefaultLogFormat, cfg.LogFormat)
-	assert.Empty(t, cfg.DatabaseURL, "未设置时不连库")
+	assert.Equal(t, testDSN, cfg.DatabaseURL, "DATABASE_URL 现在是必需项，由 setEnv 注入")
 	assert.Equal(t, DefaultDBMaxConns, cfg.DBMaxConns)
 	assert.Equal(t, DefaultDBConnectTimeout, cfg.DBConnectTimeout)
 }
@@ -192,6 +203,13 @@ func TestLoad_InvalidValues(t *testing.T) {
 			name:    "建连超时为负",
 			env:     map[string]string{"DB_CONNECT_TIMEOUT": "-1s"},
 			wantErr: "DB_CONNECT_TIMEOUT must be positive",
+		},
+		{
+			// Required since the service gained endpoints that read and
+			// write the database; it was optional while none did.
+			name:    "缺少数据库连接串",
+			env:     map[string]string{"DATABASE_URL": ""},
+			wantErr: "DATABASE_URL is required",
 		},
 	}
 

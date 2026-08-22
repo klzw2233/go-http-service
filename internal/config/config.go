@@ -86,10 +86,9 @@ type Config struct {
 
 	// DatabaseURL is the PostgreSQL connection string. Env: DATABASE_URL.
 	//
-	// Empty means no database: the service starts, registers no database
-	// readiness check, and serves the endpoints that need no persistence.
-	// That is honest for now, since none of them do. It becomes required
-	// once the first database-backed endpoint exists.
+	// Required: the service exposes endpoints that read and write the
+	// database, so starting without one would only produce 500s. It was
+	// optional while no endpoint needed persistence.
 	//
 	// Never log this value directly; see LogValue and redactDSN.
 	DatabaseURL string
@@ -202,7 +201,10 @@ func (c *Config) validate() []error {
 
 	// Pool settings only matter when a database is configured, so an
 	// unused DB_MAX_CONNS=0 is not worth failing a deployment over.
-	if c.DatabaseURL != "" && c.DBMaxConns <= 0 {
+	if c.DatabaseURL == "" {
+		errs = append(errs, errors.New(
+			"DATABASE_URL is required; the service cannot serve its endpoints without a database"))
+	} else if c.DBMaxConns <= 0 {
 		errs = append(errs, fmt.Errorf("DB_MAX_CONNS must be positive, got %d", c.DBMaxConns))
 	}
 

@@ -16,6 +16,8 @@ import (
 	"go-http-service/internal/config"
 	"go-http-service/internal/db"
 	"go-http-service/internal/handler"
+	"go-http-service/internal/repository"
+	"go-http-service/internal/service"
 )
 
 func main() {
@@ -52,37 +54,39 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// The database is optional for now: no endpoint needs persistence
-	// yet, so requiring it would force a dependency nothing uses. This
-	// becomes required once the first database-backed endpoint lands.
-	var apiOpts []handler.Option
-
-	if cfg.DatabaseURL != "" {
-		pool, err := db.Connect(ctx, cfg)
-		if err != nil {
-			return fmt.Errorf("database: %w", err)
-		}
-
-		// Registered HERE, above the server, and that placement is the
-		// whole point. defer runs last-in-first-out while srv.Shutdown
-		// below is an ordinary call, so the real order is: drain
-		// in-flight HTTP requests, return from run, then close the pool.
-		// Closing the pool first would cut off queries that requests are
-		// still waiting on.
-		defer func() {
-			logger.Info("closing database pool")
-			pool.Close()
-		}()
-
-		apiOpts = append(apiOpts, handler.WithReadyCheck("database",
-			db.HealthCheck(pool, cfg.DBConnectTimeout)))
-
-		logger.Info("database pool ready", "max_conns", cfg.DBMaxConns)
-	} else {
-		logger.Warn("DATABASE_URL is unset, starting without a database")
+	// The database is required: every dependency below hangs off the
+	// pool, and the service has endpoints that cannot answer without it.
+	pool, err := db.Connect(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("database: %w", err)
 	}
 
-	api := handler.New(cfg, logger, apiOpts...)
+	// Registered HERE, above the server, and that placement is the whole
+	// point. defer runs last-in-first-out while srv.Shutdown below is an
+	// ordinary call, so the real order is: drain in-flight HTTP
+	// requests, return from run, then close the pool. Closing the pool
+	// first would cut off queries that requests are still waiting on.
+	defer func() {
+		logger.Info("closing database pool")
+		pool.Close()
+	}()
+
+	// Migrations run before the server accepts traffic, so no request
+	// can arrive against a schema that is mid-upgrade. Concurrent
+	// replicas are serialised by an advisory lock inside Migrate.
+	if err := db.Migrate(ctx, pool, logger); err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+
+	logger.Info("database pool ready", "max_conns", cfg.DBMaxConns)
+
+	// Dependencies are wired outward: repository -> service -> API.
+	users := service.NewUserService(repository.NewUserRepository(pool))
+
+	api := handler.New(cfg, logger,
+		handler.WithUserService(users),
+		handler.WithReadyCheck("database", db.HealthCheck(pool, cfg.DBConnectTimeout)),
+	)
 
 	srv := &http.Server{
 		Addr:              cfg.Addr(),
