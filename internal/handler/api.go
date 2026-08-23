@@ -31,12 +31,30 @@ type API struct {
 	// package does not reach past the service layer.
 	users userRegistrar
 
+	// auth verifies credentials and resolves authenticated callers.
+	auth authenticator
+
+	// tokens verifies access tokens. Separate from auth because the
+	// middleware only needs verification, not the database.
+	tokens tokenVerifier
+
 	readyChecks []readyCheck
 }
 
 // userRegistrar is the slice of the user service the handlers use.
 type userRegistrar interface {
 	Register(ctx context.Context, in service.RegisterInput) (*model.User, error)
+}
+
+// authenticator is the slice of the auth service the handlers use.
+type authenticator interface {
+	Login(ctx context.Context, username, password string) (*service.LoginResult, error)
+	UserByID(ctx context.Context, id int64) (*model.User, error)
+}
+
+// tokenVerifier checks an access token and reports whose it is.
+type tokenVerifier interface {
+	ParseAccess(token string) (int64, error)
 }
 
 // readyCheck is one dependency probed by the readiness endpoint.
@@ -70,6 +88,16 @@ func WithClock(fn func() time.Time) Option {
 // WithUserService supplies the account operations behind POST /api/users.
 func WithUserService(users userRegistrar) Option {
 	return func(a *API) { a.users = users }
+}
+
+// WithAuthService supplies credential verification for the auth routes.
+func WithAuthService(auth authenticator) Option {
+	return func(a *API) { a.auth = auth }
+}
+
+// WithTokenVerifier supplies access token verification for requireAuth.
+func WithTokenVerifier(tokens tokenVerifier) Option {
+	return func(a *API) { a.tokens = tokens }
 }
 
 // WithReadyCheck registers a dependency probe for GET /api/ready.

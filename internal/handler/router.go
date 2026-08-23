@@ -78,6 +78,21 @@ func SetupRouter(api *API) *gin.Engine {
 		limited.POST("/users", api.CreateUser)
 	}
 
+	// Login gets its own, far tighter bucket. It is the one endpoint
+	// where an attacker gains something from sheer volume, and the
+	// global budget is generous enough to be useless against guessing.
+	loginLimiter := newIPRateLimiter(
+		rate.Limit(api.cfg.LoginRateLimitRPM)/60, int(api.cfg.LoginRateLimitBurst))
+
+	authRoutes := r.Group(apiBasePath + "/auth")
+	{
+		authRoutes.POST("/login", api.rateLimit(loginLimiter), api.Login)
+
+		// Reads behind a token only need the global budget; they are
+		// bounded by having to hold a valid token in the first place.
+		authRoutes.GET("/me", api.rateLimit(globalLimiter), api.requireAuth(), api.Me)
+	}
+
 	return r
 }
 

@@ -24,6 +24,7 @@ var envVars = []string{
 	"DATABASE_URL", "DB_MAX_CONNS", "DB_CONNECT_TIMEOUT",
 	"RATE_LIMIT_RPS", "RATE_LIMIT_BURST",
 	"LOGIN_RATE_LIMIT_RPM", "LOGIN_RATE_LIMIT_BURST",
+	"JWT_SECRET", "ACCESS_TOKEN_TTL",
 }
 
 // testDSN is a syntactically valid connection string. It is seeded by
@@ -32,11 +33,16 @@ var envVars = []string{
 // care about.
 const testDSN = "postgres://app:pw@db:5432/svc"
 
+// testJWTSecret is exactly at the minimum length, so the same value
+// exercises both the length rule and the happy path.
+const testJWTSecret = "0123456789abcdef0123456789abcdef"
+
 // setEnv clears every known variable, seeds the required ones, then
 // applies the given overrides. t.Setenv restores the previous values,
 // and forbids t.Parallel.
 //
-// Pass DATABASE_URL: "" in overrides to test the missing-database case.
+// Pass DATABASE_URL: "" or JWT_SECRET: "" in overrides to test the
+// missing cases.
 func setEnv(t *testing.T, overrides map[string]string) {
 	t.Helper()
 
@@ -44,6 +50,7 @@ func setEnv(t *testing.T, overrides map[string]string) {
 		t.Setenv(k, "")
 	}
 	t.Setenv("DATABASE_URL", testDSN)
+	t.Setenv("JWT_SECRET", testJWTSecret)
 
 	for k, v := range overrides {
 		t.Setenv(k, v)
@@ -74,6 +81,8 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, DefaultRateLimitBurst, cfg.RateLimitBurst)
 	assert.Equal(t, DefaultLoginRateLimitRPM, cfg.LoginRateLimitRPM)
 	assert.Equal(t, DefaultLoginRateLimitBurst, cfg.LoginRateLimitBurst)
+	assert.Equal(t, testJWTSecret, cfg.JWTSecret, "JWT_SECRET 是必需项，由 setEnv 注入")
+	assert.Equal(t, DefaultAccessTokenTTL, cfg.AccessTokenTTL)
 }
 
 func TestLoad_Overrides(t *testing.T) {
@@ -229,6 +238,18 @@ func TestLoad_InvalidValues(t *testing.T) {
 			env:     map[string]string{"LOGIN_RATE_LIMIT_RPM": "-1"},
 			wantErr: "LOGIN_RATE_LIMIT_RPM must be positive",
 		},
+		{
+			name:    "缺少 JWT 密钥",
+			env:     map[string]string{"JWT_SECRET": ""},
+			wantErr: "JWT_SECRET is required",
+		},
+		{
+			// HMAC 的强度上限就是密钥熵，短密钥可以离线爆破出来，
+			// 之后攻击者能给任意用户签发 token。
+			name:    "JWT 密钥过短",
+			env:     map[string]string{"JWT_SECRET": strings.Repeat("a", MinJWTSecretLen-1)},
+			wantErr: "JWT_SECRET must be at least 32 bytes",
+		},
 	}
 
 	for _, tt := range tests {
@@ -360,6 +381,50 @@ func TestLogValueRedactsDatabasePassword(t *testing.T) {
 	// confirming the deployment connected where it was meant to.
 	assert.Contains(t, got, "db.internal:5432")
 	assert.Contains(t, got, "svc")
+}
+
+// TestLogValueRedactsJWTSecret is the counterpart for the signing key,
+// and it is stricter than the DSN case on purpose.
+//
+// A connection string has parts worth keeping - host and database name
+// are what make the startup record useful for confirming a deployment
+// connected where it was meant to. A signing key has no such part: any
+// fragment of it only helps an attacker, so the whole value is replaced.
+func TestLogValueRedactsJWTSecret(t *testing.T) {
+	const secret = "s3cr3t-signing-key-long-enough-for-hs256"
+	setEnv(t, map[string]string{"JWT_SECRET": secret})
+
+	cfg, err := Load()
+	require.NoError(t, err)
+
+	var buf bytes.Buffer
+	slog.New(slog.NewJSONHandler(&buf, nil)).Info("startup", "config", cfg)
+	logged := buf.String()
+
+	assert.NotContains(t, logged, secret, "启动日志泄露了 JWT 密钥: %s", logged)
+
+	var record struct {
+		Config map[string]any `json:"config"`
+	}
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &record))
+
+	got, _ := record.Config["jwt_secret"].(string)
+	assert.Equal(t, dsnOpaque, got, "只应报告是否已配置")
+
+	// Not even a prefix. The length is covered by the equality above -
+	// the field is a constant, so nothing about the input reaches it.
+	// Searching the whole record for the length as a number would be
+	// meaningless: small integers appear all over a config dump.
+	assert.NotContains(t, logged, secret[:8])
+}
+
+func TestRedactSecret(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, dsnUnset, redactSecret(""))
+	assert.Equal(t, dsnOpaque, redactSecret("anything-at-all"))
+	assert.Equal(t, dsnOpaque, redactSecret(strings.Repeat("x", 1000)),
+		"输出不该随输入变化，否则长度就泄露了")
 }
 
 func TestRedactDSN(t *testing.T) {

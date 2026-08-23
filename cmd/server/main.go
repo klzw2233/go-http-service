@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"go-http-service/internal/auth"
 	"go-http-service/internal/config"
 	"go-http-service/internal/db"
 	"go-http-service/internal/handler"
@@ -81,10 +82,23 @@ func run() error {
 	logger.Info("database pool ready", "max_conns", cfg.DBMaxConns)
 
 	// Dependencies are wired outward: repository -> service -> API.
-	users := service.NewUserService(repository.NewUserRepository(pool))
+	userRepo := repository.NewUserRepository(pool)
+	users := service.NewUserService(userRepo)
+
+	tokens, err := auth.NewTokenIssuer(cfg.JWTSecret, cfg.AccessTokenTTL)
+	if err != nil {
+		return fmt.Errorf("token issuer: %w", err)
+	}
+
+	authSvc, err := service.NewAuthService(userRepo, tokens)
+	if err != nil {
+		return fmt.Errorf("auth service: %w", err)
+	}
 
 	api := handler.New(cfg, logger,
 		handler.WithUserService(users),
+		handler.WithAuthService(authSvc),
+		handler.WithTokenVerifier(tokens),
 		handler.WithReadyCheck("database", db.HealthCheck(pool, cfg.DBConnectTimeout)),
 	)
 

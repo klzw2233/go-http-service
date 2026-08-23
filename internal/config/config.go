@@ -60,6 +60,16 @@ const (
 	DefaultLoginRateLimitRPM   int64 = 5
 	DefaultLoginRateLimitBurst int64 = 5
 
+	// Short on purpose. An access token cannot be revoked once issued,
+	// so its lifetime is the window an attacker gets from a stolen one.
+	// Continuity comes from the refresh token instead.
+	DefaultAccessTokenTTL = 15 * time.Minute
+
+	// MinJWTSecretLen mirrors auth.MinSecretLen. It is duplicated rather
+	// than imported because config must not depend on other internal
+	// packages; a test asserts the two stay equal.
+	MinJWTSecretLen = 32
+
 	DefaultLogLevel  = slog.LevelInfo
 	DefaultLogFormat = FormatJSON
 )
@@ -124,6 +134,20 @@ type Config struct {
 	LoginRateLimitRPM   int64
 	LoginRateLimitBurst int64
 
+	// JWTSecret signs access tokens. Env: JWT_SECRET.
+	//
+	// Required, and at least auth.MinSecretLen bytes: HMAC is only as
+	// strong as its key, and a short one can be recovered offline from
+	// any captured token, after which an attacker mints tokens for
+	// whoever they like.
+	//
+	// Never log this value; see LogValue and redactSecret.
+	JWTSecret string
+
+	// AccessTokenTTL is how long an access token stays valid.
+	// Env: ACCESS_TOKEN_TTL.
+	AccessTokenTTL time.Duration
+
 	// LogLevel is the minimum level to emit. Env: LOG_LEVEL.
 	LogLevel slog.Level
 
@@ -151,6 +175,7 @@ func Load() (*Config, error) {
 		TrustedProxies: envList("TRUSTED_PROXIES"),
 		LogFormat:      strings.ToLower(envString("LOG_FORMAT", DefaultLogFormat)),
 		DatabaseURL:    envString("DATABASE_URL", ""),
+		JWTSecret:      envString("JWT_SECRET", ""),
 	}
 
 	var err error
@@ -183,6 +208,9 @@ func Load() (*Config, error) {
 	cfg.LoginRateLimitRPM, err = envInt64("LOGIN_RATE_LIMIT_RPM", DefaultLoginRateLimitRPM)
 	track(err)
 	cfg.LoginRateLimitBurst, err = envInt64("LOGIN_RATE_LIMIT_BURST", DefaultLoginRateLimitBurst)
+	track(err)
+
+	cfg.AccessTokenTTL, err = envDuration("ACCESS_TOKEN_TTL", DefaultAccessTokenTTL)
 	track(err)
 
 	cfg.LogLevel, err = envLogLevel("LOG_LEVEL", DefaultLogLevel)
@@ -257,6 +285,19 @@ func (c *Config) validate() []error {
 		}
 	}
 
+	switch {
+	case c.JWTSecret == "":
+		errs = append(errs, errors.New(
+			"JWT_SECRET is required; generate one with: openssl rand -base64 48"))
+	case len(c.JWTSecret) < MinJWTSecretLen:
+		// Reporting the length is safe and useful; reporting the value
+		// would put the signing key in the error and then in the log.
+		errs = append(errs, fmt.Errorf(
+			"JWT_SECRET must be at least %d bytes, got %d; a short HMAC key can be "+
+				"brute-forced offline from any captured token",
+			MinJWTSecretLen, len(c.JWTSecret)))
+	}
+
 	return errs
 }
 
@@ -292,6 +333,8 @@ func (c *Config) LogValue() slog.Value {
 		slog.Int64("rate_limit_burst", c.RateLimitBurst),
 		slog.Int64("login_rate_limit_rpm", c.LoginRateLimitRPM),
 		slog.Int64("login_rate_limit_burst", c.LoginRateLimitBurst),
+		slog.String("jwt_secret", redactSecret(c.JWTSecret)),
+		slog.String("access_token_ttl", c.AccessTokenTTL.String()),
 		slog.String("log_level", c.LogLevel.String()),
 		slog.String("log_format", c.LogFormat),
 	)
@@ -327,6 +370,19 @@ func redactDSN(dsn string) string {
 		return dsnOpaque
 	}
 	return u.Redacted()
+}
+
+// redactSecret reports only whether a secret is configured.
+//
+// Unlike a connection string, a signing key has no non-sensitive part
+// worth keeping: the host and database name in a DSN make the startup
+// log useful, whereas any portion of an HMAC key only helps an attacker.
+// Even the length is withheld, since it narrows a brute-force search.
+func redactSecret(secret string) string {
+	if secret == "" {
+		return dsnUnset
+	}
+	return dsnOpaque
 }
 
 func validatePort(p string) error {

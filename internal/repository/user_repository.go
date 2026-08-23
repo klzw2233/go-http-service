@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -22,6 +23,7 @@ import (
 var (
 	ErrUsernameTaken = errors.New("username already taken")
 	ErrEmailTaken    = errors.New("email already taken")
+	ErrUserNotFound  = errors.New("user not found")
 )
 
 // pgUniqueViolation is PostgreSQL's SQLSTATE for a unique constraint
@@ -68,6 +70,55 @@ func (r *UserRepository) Create(ctx context.Context, u *model.User) error {
 		return translateCreateError(err)
 	}
 	return nil
+}
+
+// FindByUsername looks a user up for authentication.
+//
+// The predicate is lower(username) rather than username because the
+// unique index is on lower(username): matching the index expression is
+// what lets PostgreSQL use it instead of scanning the table. It also
+// keeps lookup consistent with registration, where Jimmy and jimmy are
+// the same account.
+//
+// Returns ErrUserNotFound rather than a nil user, so a caller cannot
+// dereference a miss by accident.
+func (r *UserRepository) FindByUsername(ctx context.Context, username string) (*model.User, error) {
+	const query = `
+		SELECT id, username, email, password_hash, created_at, updated_at
+		FROM users
+		WHERE lower(username) = lower($1)`
+
+	var u model.User
+	err := r.pool.QueryRow(ctx, query, username).Scan(
+		&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.CreatedAt, &u.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrUserNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("find user by username: %w", err)
+	}
+
+	return &u, nil
+}
+
+// FindByID looks a user up from an authenticated request's subject.
+func (r *UserRepository) FindByID(ctx context.Context, id int64) (*model.User, error) {
+	const query = `
+		SELECT id, username, email, password_hash, created_at, updated_at
+		FROM users
+		WHERE id = $1`
+
+	var u model.User
+	err := r.pool.QueryRow(ctx, query, id).Scan(
+		&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.CreatedAt, &u.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrUserNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("find user by id: %w", err)
+	}
+
+	return &u, nil
 }
 
 // translateCreateError maps a driver error onto this layer's vocabulary.
