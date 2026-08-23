@@ -2,7 +2,7 @@
 
 > 文件位置：`go-http-service/CLAUDE.md`
 > 用途：告知 Claude Code 本项目的运行环境、约定与注意事项
-> 最后更新：2026-08-22（从 Win10 + Git Bash 改写为 Ubuntu 虚拟机环境）
+> 最后更新：2026-08-23（步骤 C：登录、JWT、refresh 轮转与限流）
 
 ---
 
@@ -24,11 +24,13 @@ PowerShell 兼容性。旧版本本文件描述的 `E:\Program Files\...` 路径
 ## 二、常用命令
 
 ```bash
-# 运行服务（默认 8080）
-go run cmd/server/main.go
+# 运行服务（DATABASE_URL 与 JWT_SECRET 都是必需项）
+DATABASE_URL="postgres://app:devsecret@127.0.0.1:5433/go_http_service?sslmode=disable" \
+JWT_SECRET="$(openssl rand -base64 48)" \
+  go run cmd/server/main.go
 
 # 换端口
-PORT=9000 go run cmd/server/main.go
+PORT=9000 DATABASE_URL="..." JWT_SECRET="..." go run cmd/server/main.go
 
 # 构建
 go build -o server ./cmd/server
@@ -47,6 +49,9 @@ curl http://localhost:8080/api/ready    # 就绪探针（含依赖检查）
 curl http://localhost:8080/api/info
 curl -X POST http://localhost:8080/api/echo \
   -H "Content-Type: application/json" -d '{"message":"hello"}'
+curl -X POST http://localhost:8080/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"jimmy","password":"correct-horse"}'
 ```
 
 开发用数据库（独立容器，映射到 5433 避开宿主机的 PostgreSQL）：
@@ -65,6 +70,7 @@ docker stop  go-http-service-db
 
 # 带数据库运行
 DATABASE_URL="postgres://app:devsecret@127.0.0.1:5433/go_http_service?sslmode=disable" \
+JWT_SECRET="$(openssl rand -base64 48)" \
   go run cmd/server/main.go
 
 # 跑需要数据库的测试（不设置这个变量则相关测试自动跳过）
@@ -222,6 +228,18 @@ repo.Create(user)
 - 对外响应用 `model.UserResponse`，不要直接返回 `model.User`
 - 新增用户相关字段前先想清楚它能不能公开
 
+### 4.11 refresh token：哈希用 SHA-256，不要用 bcrypt
+
+refresh token 和密码都是凭据，都不能明文入库。但 refresh token 是 32 字节
+随机值，不存在离线爆破问题，用 bcrypt 会让每次刷新都付出 ~60ms，把热路径
+变成 CPU 瓶颈。存 SHA-256 十六进制。
+
+轮转必须原子：`TryRotate` 是 repository 的一个方法（事务不暴露给 service）。
+重放已撤销的 token 会撤销该用户全部会话；对已撤销 token 再 logout **不得**
+走这条路径，否则双击登出会踢掉其他设备。
+
+对外一律 401 + `UNAUTHORIZED`。`ErrRefreshTokenReused` 只给日志用。
+
 ---
 
 ## 五、环境变量
@@ -237,7 +255,9 @@ repo.Create(user)
 | `PORT` | `8080` | 服务监听端口 |
 | `TRUSTED_PROXIES` | 空（谁都不信任） | 逗号分隔的可信代理 IP / CIDR |
 | `REQUEST_TIMEOUT` | `8s` | 单请求处理超时，必须小于 `WRITE_TIMEOUT` |
-| `DATABASE_URL` | 空（不连库） | PostgreSQL 连接串，**目前可选** |
+| `DATABASE_URL` | **必需** | PostgreSQL 连接串 |
+| `JWT_SECRET` | **必需**，≥32 字节 | HS256 密钥，必须在 `LogValue()` 脱敏 |
+| `ACCESS_TOKEN_TTL` / `REFRESH_TOKEN_TTL` | `15m` / `720h` | token 有效期 |
 | `LOG_LEVEL` / `LOG_FORMAT` | `info` / `json` | 日志级别与格式 |
 
 `TRUSTED_PROXIES` 留空时 `c.ClientIP()` 取 TCP 真实对端地址，客户端无法通过
@@ -245,9 +265,9 @@ repo.Create(user)
 
 ### 5.1 DSN 绝不能进日志
 
-`DATABASE_URL` 里带口令。`config.LogValue()` 会在**每次启动**时把配置写进日志，
-所以那里必须走 `redactDSN()`。新增任何含凭据的配置项时同理：
-在 `LogValue` 里脱敏，不要在调用处。
+`DATABASE_URL` 里带口令，`JWT_SECRET` 是签名密钥。`config.LogValue()` 会在
+**每次启动**时把配置写进日志，所以那里必须走 `redactDSN()` / `redactSecret()`。
+新增任何含凭据的配置项时同理：在 `LogValue` 里脱敏，不要在调用处。
 
 `internal/db` 的 `ErrInvalidDSN` 也是同一个原因——pgx 的解析错误会带上原始连接串，
 而这个错误会被 `main` 写进日志，所以**不包装原错误**。
@@ -258,17 +278,20 @@ repo.Create(user)
 
 ```
 cmd/server/main.go          装配依赖、构造 logger、信号监听、优雅关闭
-internal/config/            所有环境变量的读取与校验、DSN 脱敏
+internal/config/            所有环境变量的读取与校验、DSN / JWT 脱敏
+internal/auth/              JWT 签发解析、refresh token 生成与 SHA-256
 internal/db/                PostgreSQL 连接池、就绪探针、手写迁移器
   migrate.go                embed + advisory lock + 每迁移一事务
   migrations/*.sql          迁移文件，按文件名顺序执行
 internal/repository/        数据访问层：Go 结构体 <-> SQL
-internal/service/           业务规则：bcrypt、校验、错误翻译
+internal/service/           业务规则：bcrypt、校验、错误翻译、登录
 internal/handler/           HTTP 层
   api.go                    API 结构体：依赖注入的载体
-  router.go                 路由注册、中间件顺序、404/405/panic
+  router.go                 路由注册、中间件顺序、404/405/panic、限流挂载
   health.go                 /api/health  liveness，不查依赖
   ready.go                  /api/ready   readiness，并发跑依赖检查
+  auth.go                   登录 / 刷新 / 登出 / me、认证中间件
+  ratelimit.go              按 IP 令牌桶 + 空闲淘汰
   info.go / echo.go
   errors.go                 绑定错误 -> 统一错误响应的翻译层
   requestid.go              Request ID 生成、校验、context 传递
@@ -313,29 +336,21 @@ handler panic 时异常会穿过 `requestLogger` 的 `c.Next()`，此时 Recover
 2. ~~接数据库前的地基：依赖注入、配置层、结构化日志、Request ID、请求超时、就绪探针~~ 已完成
 3. ~~接 PostgreSQL 步骤 A：连接池 + 就绪探针接上真实数据库~~ 已完成
 4. ~~接 PostgreSQL 步骤 B：迁移机制 + `users` 表 + 注册接口~~ 已完成
-5. 接 PostgreSQL 步骤 C：登录 + JWT 认证
-6. 补充中间件：CORS、限流、安全响应头
+5. ~~接 PostgreSQL 步骤 C：登录 + JWT + refresh 轮转 + 限流~~ 已完成
+6. 补充中间件：CORS、安全响应头
 7. 使用 Docker 容器化部署
 8. 尝试 Kubernetes 部署
 
-### 步骤 C 要做什么
+### 步骤 C 已落地的规矩（后续直接沿用）
 
-1. **`POST /api/auth/login`**：查用户、`bcrypt.CompareHashAndPassword` 比对、签发 JWT
-2. **JWT 密钥进 config**：必需项，且**必须在 `LogValue()` 里脱敏**，
-   和 `DATABASE_URL` 同等对待（见 5.1）
-3. **认证中间件**：解析 `Authorization: Bearer`，把用户 ID 注入 context。
-   注册顺序参考第六节，它应该在 timeout 之后、具体路由之前
-4. **`GET /api/auth/me`**：受保护接口的第一个例子
-5. **Repository 加 `FindByUsername`**：注意查询要写成
-   `WHERE lower(username) = lower($1)` 才能命中函数索引
+- 登录失败（用户不存在 / 密码错误 / 无效 refresh / 重放）对外都是同一个 401
+- 用户不存在时也跑一次假 bcrypt，两条路径耗时接近
+- `JWT_SECRET` 必需、≥32 字节、`LogValue()` 脱敏
+- refresh 存 SHA-256 不是 bcrypt；轮转走 `TryRotate`；重放才全家撤销
+- 探针不限流；登录 / 刷新 / 登出走更严的桶；内存限流每副本独立
+- 认证中间件在 timeout 之后、具体路由之前
 
-> 登录接口有两个容易忽略的安全点：
->
-> 1. **用户不存在和密码错误必须返回完全相同的响应**，否则接口就成了用户名枚举器
-> 2. **两条路径的耗时也要接近**。用户不存在时直接返回会明显快于跑一次 bcrypt 比对，
->    这个时间差足以被计时区分出来。做法是即使用户不存在也执行一次假的哈希比对
-
-### 已经立好的规矩（步骤 C 直接沿用）
+### 已经立好的规矩（后续直接沿用）
 
 - **关闭顺序**：`defer pool.Close()` 注册在 `srv` 之前，实际执行是
   「排空 HTTP 请求 → 关连接池」。`cmd/server/e2e_test.go` 有断言守着，别改坏它

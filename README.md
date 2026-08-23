@@ -1,8 +1,7 @@
 # Go HTTP Service
 
 > Backend Engineer 学习路线的第一个实战项目：从零搭建一个 Go HTTP 服务。
-> 当前已完成接入数据库前的全部地基——依赖注入、集中配置、结构化日志、
-> 请求关联 ID、单请求超时、存活/就绪双探针，并有 CI 与端到端测试保障。
+> 当前已完成注册、登录、JWT、refresh 轮转与按 IP 限流，并有 CI 与端到端测试保障。
 
 ---
 
@@ -13,8 +12,8 @@
 - 使用 [Gin](https://github.com/gin-gonic/gin) Web 框架启动 HTTP 服务
 - 按分层架构组织代码，依赖通过构造函数注入而非包级变量
 - 对外契约稳定：统一的错误响应结构，绝不泄露内部实现细节
-- 具备生产服务的基本要素：超时、优雅关闭、结构化日志、探针
-- 为下一步接入 PostgreSQL 铺好路（见文末「下一步计划」）
+- 具备生产服务的基本要素：超时、优雅关闭、结构化日志、探针、限流
+- 用户可注册、登录，受保护接口走 JWT；refresh token 带轮转与重放检测
 
 ### 已完成的能力
 
@@ -26,9 +25,13 @@
 | 请求关联 ID | `X-Request-Id`，注入 `context`，客户端传入值经过校验 |
 | 两层超时 | `http.Server` 四项 + 单请求 `REQUEST_TIMEOUT` |
 | 优雅关闭 | `SIGINT` / `SIGTERM` 排空在途请求后退出 |
-| 探针分级 | `/api/health` 存活、`/api/ready` 就绪（可挂依赖检查） |
+| 探针分级 | `/api/health` 存活、`/api/ready` 就绪（含数据库检查） |
 | 安全默认 | 不信任任何代理、请求体上限、panic 不泄露堆栈 |
-| 测试 | 单元 + 端到端（启动真实进程走真实 TCP），CI 跑竞态检测 |
+| 用户注册 | `POST /api/users`，bcrypt 哈希、唯一约束防 TOCTOU |
+| 登录与 JWT | `POST /api/auth/login`，HS256，失败响应完全一致 |
+| Refresh 轮转 | 每次刷新作废旧 token；重放则撤销该用户全部会话 |
+| 按 IP 限流 | 全局宽松 + 登录严格，探针豁免；内存实现，每副本独立 |
+| 测试 | 单元 + 端到端（启动真实进程走真实 TCP），CI 跑竞态检测与 govulncheck |
 
 ---
 
@@ -45,18 +48,22 @@ go-http-service/
 │   ├── config/
 │   │   ├── config.go            # 所有环境变量的读取与校验、DSN 脱敏
 │   │   └── config_test.go
+│   ├── auth/
+│   │   ├── token.go             # JWT 签发与解析（HS256）
+│   │   └── refresh.go           # refresh token 生成与 SHA-256
 │   ├── db/
 │   │   ├── db.go                # PostgreSQL 连接池与就绪探针
 │   │   ├── migrate.go           # 手写迁移器（embed + advisory lock）
 │   │   ├── migrations/          # SQL 迁移文件，按文件名顺序执行
-│   │   │   └── 0001_create_users.sql
+│   │   │   ├── 0001_create_users.sql
+│   │   │   └── 0002_create_refresh_tokens.sql
 │   │   └── db_test.go
 │   ├── repository/
 │   │   ├── user_repository.go   # users 表读写、唯一键冲突翻译
-│   │   └── user_repository_test.go
+│   │   └── refresh_token_repository.go  # refresh 哈希存取、轮转、重放
 │   ├── service/
 │   │   ├── user_service.go      # 注册业务规则、bcrypt
-│   │   └── user_service_test.go
+│   │   └── auth_service.go      # 登录、刷新、登出、计时拉平
 │   ├── handler/
 │   │   ├── api.go               # API 结构体：依赖注入的载体
 │   │   ├── router.go            # 路由注册、中间件顺序、404/405/panic
@@ -65,19 +72,19 @@ go-http-service/
 │   │   ├── info.go              # /api/info
 │   │   ├── echo.go              # /api/echo
 │   │   ├── user.go              # /api/users    注册
+│   │   ├── auth.go              # 登录 / 刷新 / 登出 / me、认证中间件
+│   │   ├── ratelimit.go         # 按 IP 令牌桶 + 空闲淘汰
 │   │   ├── errors.go            # 绑定错误 -> 统一错误响应的翻译层
 │   │   ├── requestid.go         # Request ID 生成、校验、context 传递
 │   │   ├── logging.go           # slog 访问日志中间件
-│   │   ├── middleware.go        # 请求体上限、单请求超时
-│   │   ├── main_test.go         # TestMain、测试夹具与请求助手
-│   │   ├── handler_test.go      # 四个接口、路由、错误契约
-│   │   ├── middleware_test.go   # Request ID、超时、日志中间件
-│   │   └── ready_test.go        # 就绪检查：并发、失败、panic、不泄露
+│   │   └── middleware.go        # 请求体上限、单请求超时
 │   └── model/
 │       ├── health.go            # HealthResponse
 │       ├── ready.go             # ReadyResponse、CheckResult
 │       ├── info.go              # InfoResponse、服务名与版本号
 │       ├── echo.go              # EchoRequest, EchoResponse
+│       ├── auth.go              # LoginRequest、TokenPair、RefreshRequest
+│       ├── refresh.go           # 入库的 RefreshToken（无 JSON 标签）
 │       ├── error.go             # ErrorResponse、错误码常量
 │       └── model_test.go
 ├── notes/                       # 中文学习笔记
@@ -110,14 +117,18 @@ cd ~/workspace/go-http-service
 
 ### 2. 运行服务
 
+`DATABASE_URL` 和 `JWT_SECRET` 都是必需项，未设置进程会拒绝启动：
+
 ```bash
-go run cmd/server/main.go
+DATABASE_URL="postgres://app:devsecret@127.0.0.1:5433/go_http_service?sslmode=disable" \
+JWT_SECRET="$(openssl rand -base64 48)" \
+  go run cmd/server/main.go
 ```
 
 默认监听 `8080`。需要换端口时通过 `PORT` 环境变量指定，无需重新编译：
 
 ```bash
-PORT=9000 go run cmd/server/main.go
+PORT=9000 DATABASE_URL="..." JWT_SECRET="..." go run cmd/server/main.go
 ```
 
 服务收到 `Ctrl+C`（SIGINT）或 `SIGTERM` 时会优雅关闭：停止接收新连接，
@@ -151,10 +162,10 @@ curl http://localhost:8080/api/health
 curl -i http://localhost:8080/api/ready
 ```
 
-预期返回 `200`，当前尚未接入任何依赖，因此检查列表为空：
+预期返回 `200`，并报告数据库依赖：
 
 ```json
-{"status":"ready","timestamp":"...","checks":[]}
+{"status":"ready","timestamp":"...","checks":[{"name":"database","status":"ok","duration_ms":3}]}
 ```
 
 任一依赖检查失败时会返回 `503`，`status` 变为 `not_ready`。
@@ -217,6 +228,59 @@ curl -i -X POST http://localhost:8080/api/users \
 ```json
 {"code":"CONFLICT","message":"that username is already taken"}
 ```
+
+#### 登录
+
+```bash
+curl -s -X POST http://localhost:8080/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"jimmy","password":"correct-horse"}'
+```
+
+预期返回 `200`：
+
+```json
+{
+  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "refresh_token": "…",
+  "token_type": "Bearer",
+  "expires_at": "2026-08-23T12:15:00Z"
+}
+```
+
+响应里没有用户名、邮箱或任何密码材料。用户信息在受保护接口里取。
+
+用户不存在和密码错误返回**完全相同**的 `401`：
+
+```json
+{"code":"UNAUTHORIZED","message":"authentication required"}
+```
+
+#### 受保护接口
+
+```bash
+curl -s -H "Authorization: Bearer $ACCESS_TOKEN" \
+  http://localhost:8080/api/auth/me
+```
+
+缺 token、格式错、过期、签名无效，全部是上面那条 401，外加
+`WWW-Authenticate: Bearer realm="api"`。
+
+#### 刷新与登出
+
+```bash
+curl -s -X POST http://localhost:8080/api/auth/refresh \
+  -H "Content-Type: application/json" \
+  -d "{\"refresh_token\":\"$REFRESH_TOKEN\"}"
+
+curl -i -X POST http://localhost:8080/api/auth/logout \
+  -H "Content-Type: application/json" \
+  -d "{\"refresh_token\":\"$REFRESH_TOKEN\"}"
+```
+
+刷新会作废旧的 refresh token 并返回新的一对。把已经用过的 refresh token
+再提交一次，服务会撤销该用户的全部会话，对外仍是同一个 401。
+登出成功返回 `204`，无响应体。
 
 ---
 
@@ -337,6 +401,7 @@ psql "postgres://app:devsecret@127.0.0.1:5433/go_http_service"   # 连进去
 
 ```bash
 DATABASE_URL="postgres://app:devsecret@127.0.0.1:5433/go_http_service?sslmode=disable" \
+JWT_SECRET="$(openssl rand -base64 48)" \
   go run cmd/server/main.go
 ```
 
@@ -356,7 +421,8 @@ golang-migrate。原因是那两个库的 API 都建立在 `database/sql` 上，
 
 ```
 internal/db/migrations/
-└── 0001_create_users.sql
+├── 0001_create_users.sql
+└── 0002_create_refresh_tokens.sql
 ```
 
 新增迁移就是加一个文件，前缀数字递增。**按文件名排序执行**，所以前缀要补零对齐。
@@ -470,6 +536,10 @@ Service 把它翻译成自己的同名错误，Handler 只匹配 Service 的错�
 | GET | `/api/info` | 返回服务元信息 |
 | POST | `/api/echo` | 接收 JSON 并回显 |
 | POST | `/api/users` | 注册用户 |
+| POST | `/api/auth/login` | 登录，返回 access + refresh |
+| POST | `/api/auth/refresh` | 用 refresh 换新的一对 |
+| POST | `/api/auth/logout` | 撤销该 refresh token |
+| GET | `/api/auth/me` | 当前用户（需 `Authorization: Bearer`） |
 
 ### health 与 ready 的区别
 
@@ -498,8 +568,8 @@ Service 把它翻译成自己的同名错误，Handler 只匹配 Service 的错�
 ```
 
 任一检查失败时返回 **503**，`status` 变为 `not_ready`，对应检查的
-`status` 为 `failed`。未设置 `DATABASE_URL` 时不注册任何检查，
-`checks` 为空数组、恒返回 200。
+`status` 为 `failed`。`DATABASE_URL` 是必需项，就绪探针始终包含
+`database` 这一项。
 
 可以实地验证这套分级——停掉数据库，两个探针的反应完全不同：
 
@@ -541,8 +611,10 @@ curl -o /dev/null -w '%{http_code}\n' localhost:8080/api/ready    # 恢复 200
 | `VALIDATION_FAILED` | 400 | JSON 合法，但字段缺失、类型错误或超出约束 |
 | `NOT_FOUND` | 404 | 路径不存在 |
 | `METHOD_NOT_ALLOWED` | 405 | 路径存在，但不支持该 HTTP 方法（响应带 `Allow` 头） |
+| `UNAUTHORIZED` | 401 | 缺少或无法使用的凭据。缺 token、格式错、过期、签名无效、用户不存在、密码错误、refresh 重放，全部是这一条 |
 | `CONFLICT` | 409 | 与已有数据冲突，如注册了别人已占用的用户名 |
 | `PAYLOAD_TOO_LARGE` | 413 | 请求体超过 `MAX_BODY_BYTES` 上限 |
+| `RATE_LIMITED` | 429 | 超过该地址的请求预算，响应带 `Retry-After` |
 | `INTERNAL_ERROR` | 500 | 服务端异常，详情只写日志 |
 
 > 底层的原始错误（validator、`encoding/json` 的报错）只写入服务端日志，
@@ -595,11 +667,23 @@ server stopped with an error  error="config: PORT must be a number, got \"abc\""
 | `DATABASE_URL` | **必需** | PostgreSQL 连接串 |
 | `DB_MAX_CONNS` | `10` | 连接池上限 |
 | `DB_CONNECT_TIMEOUT` | `5s` | 建连超时，同时用作就绪探测的超时 |
+| `JWT_SECRET` | **必需**，至少 32 字节 | HS256 签名密钥，启动日志脱敏为 `(set)` |
+| `ACCESS_TOKEN_TTL` | `15m` | access token 有效期 |
+| `REFRESH_TOKEN_TTL` | `720h` | refresh token 有效期（30 天） |
+| `RATE_LIMIT_RPS` | `20` | 全局限流（探针除外），每地址每秒 |
+| `RATE_LIMIT_BURST` | `40` | 全局限流突发 |
+| `LOGIN_RATE_LIMIT_RPM` | `5` | 登录 / 刷新 / 登出，每地址每分钟 |
+| `LOGIN_RATE_LIMIT_BURST` | `5` | 登录限流突发 |
 | `GIN_MODE` | 未设置时按 `release` 运行 | 由 gin 自身读取，见下 |
 
 关于 `DATABASE_URL`：**现在是必需项**，未设置时进程拒绝启动。
 在只有 health / info / echo 三个接口的阶段它是可选的——那时没有任何接口需要持久化，
 设成必需等于强制一个用不到的依赖。加了 `POST /api/users` 之后就说不通了。
+
+关于 `JWT_SECRET`：同样是必需项，长度至少 32 字节。HS256 的安全性直接取决于
+密钥熵，短密钥可以离线爆破，之后攻击者能给任意用户签发 token。
+生成一个：`openssl rand -base64 48`。启动日志里这个字段是 `(set)`，
+连长度都不保留——长度会缩小爆破搜索空间。
 
 `DB_MAX_CONNS` 显式固定连接池上限，而不是用 pgx 的默认值（`max(4, CPU 核数)`）——
 后者会让同一个服务换台机器部署就对数据库产生不同的压力。
@@ -672,10 +756,11 @@ handler 的 deadline 永远没机会生效。配置校验会拒绝违反此约�
 > 这条记录是给人看的，十位数的整数没法一眼看出配置对不对。
 > 非时长字段保持原本类型，`max_body_bytes` 仍是数字，还能做数值比较。
 
-> **`database_url` 是脱敏后的**。这条记录每次启动都会写一遍并被日志系统长期留存，
-> 原样打印等于把数据库口令永久落盘。脱敏用标准库 `url.Redacted()`，
-> 把口令替换成 `xxxxx` 但保留主机、端口和库名——那才是这条日志的用处所在
-> （确认部署真的连到了预期的库）。
+> **`database_url` 和 `jwt_secret` 都是脱敏后的**。这条记录每次启动都会写一遍
+> 并被日志系统长期留存，原样打印等于把凭据永久落盘。DSN 用标准库
+> `url.Redacted()`，把口令替换成 `xxxxx` 但保留主机、端口和库名——那才是
+> 这条日志的用处所在（确认部署真的连到了预期的库）。签名密钥没有任何
+> 非敏感部分值得保留，所以整个值替换成 `(set)`，连长度都不给。
 >
 > 无法按 URL 解析的连接串（pgx 也接受 `host=... password=...` 这种形式）
 > 一律输出固定的 `(set)`，**绝不回退到打印原文**——解析失败恰恰是最容易漏出口令的情形。
@@ -715,39 +800,69 @@ X-Request-Id: x","level":"ERROR","msg":"payment approved
 
 ---
 
+## 认证
+
+登录成功返回一对 token：短寿命的 access JWT，长寿命的 refresh token。
+
+**Access token** 是 HS256 JWT，payload 只有标准声明（`sub` 是用户 id、`exp`、`iat`）。
+不放用户名或邮箱——JWT 的 payload 只是 base64，任何拿到它的人都能读。
+它一旦签发就无法撤销，所以默认只有 15 分钟；连续性靠 refresh。
+
+**Refresh token** 是 32 字节随机值，base64url 交给客户端，**SHA-256 十六进制入库**。
+不能用 bcrypt：refresh token 是高熵随机数，不存在「猜出原文」的问题，
+而每次刷新都跑一次慢哈希会把这个接口变成 CPU 瓶颈。
+
+每次刷新都作废旧 token、签发新的一对。如果一个已经被作废的 refresh token
+再次出现，服务假定它被窃取了，**撤销该用户的全部 refresh token**，强制重新登录。
+对外仍然是同一个 401，好让攻击者分不清「打错了」和「已经被发现了」。
+
+对已经撤销的 token 再 logout **不会**触发全家撤销——否则双击登出就会把
+其他设备全部踢下线。
+
+登录还有两个安全点：
+
+1. 用户不存在和密码错误返回完全相同的响应，否则接口就是用户名枚举器
+2. 两条路径的耗时也要接近。用户不存在时也跑一次假的 bcrypt 比对，
+   否则大约 60ms 的差距足以被计时区分出来
+
+`JWT_SECRET` 至少 32 字节。短密钥可以离线爆破，之后攻击者能给任意用户签发 token。
+
+---
+
+## 限流
+
+按客户端 IP 分桶，用 `golang.org/x/time/rate` 的令牌桶。空闲桶会被机会式淘汰，
+否则攻击者轮换源 IP 就能把这个 map 撑爆——限流中间件自己成了 DoS 入口。
+
+| 作用域 | 默认 | 说明 |
+|--------|------|------|
+| `/api/health`、`/api/ready` | **不限流** | kubelet 从同一地址高频探测，限流会把健康容器重启掉 |
+| 登录 / 刷新 / 登出 | 5 次/分钟，突发 5 | 攻击者从暴力猜密码上获益最大的入口 |
+| 其余接口 | 20 次/秒，突发 40 | 普通使用感觉不到 |
+
+超限返回 **429** + `RATE_LIMITED`，带 `Retry-After`。
+
+IP 取自 `c.ClientIP()`，正确性依赖 `TRUSTED_PROXIES`。默认不信任任何代理，
+客户端无法通过 `X-Forwarded-For` 伪造自身 IP 来绕过限流。
+
+> **局限**：内存限流是**每副本独立**的。N 个副本时实际限额是 N 倍。
+> 真要跨副本精确限流需要 Redis，属于后续工作。
+
+---
+
 ## 下一步计划
 
-接数据库这件事拆成了三步，**步骤 A、B 已完成**。
+接数据库这件事拆成了三步，**步骤 A、B、C 都已完成**。
 
 | 步骤 | 内容 | 状态 |
 |------|------|------|
 | A | 连接池、就绪探针接上真实数据库、验证关闭顺序 | **已完成** |
 | B | 迁移机制 + `users` 表 + 注册接口 | **已完成** |
-| C | 登录 + JWT 认证中间件 | 下一步 |
-
-步骤 A 刻意不写任何业务逻辑。它的目的是**用一个真实依赖去验证地基**——
-`WithReadyCheck` 的扩展点、`defer pool.Close()` 的关闭顺序、context 的传播链，
-在此之前都只有测试验证过，没有被任何外部依赖真正接上去试过。
-
-步骤 B 是第一个**垂直切片**：从 HTTP 请求一路穿到 SQL，
-把 `internal/repository` 和 `internal/service` 两层立起来。
-
-### 步骤 C 要做的
-
-1. `POST /api/auth/login`：查用户、`bcrypt.CompareHashAndPassword` 比对、签发 JWT
-2. JWT 密钥进 config（**必需项，且要脱敏**，和 `DATABASE_URL` 同样处理）
-3. 认证中间件：解析 `Authorization: Bearer`，把用户 ID 注入 context
-4. `GET /api/auth/me`：受保护接口的第一个例子
-5. Repository 加 `FindByUsername`，注意 `WHERE lower(username) = lower($1)`
-   才能命中函数索引
-
-登录接口有个容易忽略的点：**用户不存在和密码错误必须返回同样的响应**，
-否则接口就成了用户名枚举器。而且两条路径的**耗时也要接近**——
-用户不存在时直接返回会明显更快，能被计时区分出来。
+| C | 登录 + JWT + refresh 轮转 + 限流 | **已完成** |
 
 ### 之后
 
-1. 补充中间件：CORS、限流、安全响应头
+1. 补充中间件：CORS、安全响应头
 2. 使用 Docker 容器化部署（`Dockerfile` + `docker-compose.yml`）
 3. 尝试 Kubernetes 部署（`/api/health` 与 `/api/ready` 已可直接对接探针）
 
@@ -757,7 +872,8 @@ X-Request-Id: x","level":"ERROR","msg":"payment approved
 
 | 笔记 | 内容 |
 |------|------|
-| `notes/接入 PostgreSQL 步骤B-注册接口与分层落地.md` | 本轮：手写迁移器、bcrypt 陷阱、TOCTOU、分层落地 |
+| `notes/接入 PostgreSQL 步骤C-登录JWT与限流.md` | 本轮：登录防枚举、JWT、refresh 哈希与轮转、限流 |
+| `notes/接入 PostgreSQL 步骤B-注册接口与分层落地.md` | 手写迁移器、bcrypt 陷阱、TOCTOU、分层落地 |
 | `notes/接入 PostgreSQL 步骤A-连接池与就绪探针.md` | 连接池、探针实证、两处凭据泄露的堵法 |
 | `notes/接入数据库前的地基.md` | 依赖注入、配置层、日志、探针等六项改造 |
 | `notes/代码审查问题清单与改进计划.md` | 代码审查的 15 个问题与修复记录 |
