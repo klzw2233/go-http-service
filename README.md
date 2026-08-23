@@ -1,7 +1,8 @@
 # Go HTTP Service
 
 > Backend Engineer 学习路线的第一个实战项目：从零搭建一个 Go HTTP 服务。
-> 当前已完成注册、登录、JWT、refresh 轮转与按 IP 限流，并有 CI 与端到端测试保障。
+> 当前已完成注册、登录、JWT、refresh 轮转、按 IP 限流、CORS 与安全响应头，
+> 并已容器化（多阶段 distroless 镜像 + compose 编排），有 CI 与端到端测试保障。
 
 ---
 
@@ -12,8 +13,9 @@
 - 使用 [Gin](https://github.com/gin-gonic/gin) Web 框架启动 HTTP 服务
 - 按分层架构组织代码，依赖通过构造函数注入而非包级变量
 - 对外契约稳定：统一的错误响应结构，绝不泄露内部实现细节
-- 具备生产服务的基本要素：超时、优雅关闭、结构化日志、探针、限流
+- 具备生产服务的基本要素：超时、优雅关闭、结构化日志、探针、限流、CORS 与安全响应头
 - 用户可注册、登录，受保护接口走 JWT；refresh token 带轮转与重放检测
+- 已容器化：多阶段 distroless 镜像 + compose 编排，CI 全流程保障
 
 ### 已完成的能力
 
@@ -963,6 +965,7 @@ IP 取自 `c.ClientIP()`，正确性依赖 `TRUSTED_PROXIES`。默认不信任�
 
 | 笔记 | 内容 |
 |------|------|
+| `notes/使用 Docker 容器化部署.md` | 本轮：多阶段 distroless 镜像、compose 编排、ldflags 注入 version 与坑 |
 | `notes/接入安全中间件-CORS与响应头.md` | 本轮：CORS fail-closed、安全响应头、中间件顺序与坑 |
 | `notes/接入 PostgreSQL 步骤C-登录JWT与限流.md` | 本轮：登录防枚举、JWT、refresh 哈希与轮转、限流 |
 | `notes/接入 PostgreSQL 步骤B-注册接口与分层落地.md` | 手写迁移器、bcrypt 陷阱、TOCTOU、分层落地 |
