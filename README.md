@@ -27,6 +27,8 @@
 | 优雅关闭 | `SIGINT` / `SIGTERM` 排空在途请求后退出 |
 | 探针分级 | `/api/health` 存活、`/api/ready` 就绪（含数据库检查） |
 | 安全默认 | 不信任任何代理、请求体上限、panic 不泄露堆栈 |
+| 安全响应头 | 每个响应都带 `nosniff`、`DENY`、`HSTS`、`Cache-Control: no-store` 等 |
+| CORS | fail-closed：未配置时拒绝所有跨域，配置后按 origin 精确匹配 |
 | 用户注册 | `POST /api/users`，bcrypt 哈希、唯一约束防 TOCTOU |
 | 登录与 JWT | `POST /api/auth/login`，HS256，失败响应完全一致 |
 | Refresh 轮转 | 每次刷新作废旧 token；重放则撤销该用户全部会话 |
@@ -74,6 +76,8 @@ go-http-service/
 │   │   ├── user.go              # /api/users    注册
 │   │   ├── auth.go              # 登录 / 刷新 / 登出 / me、认证中间件
 │   │   ├── ratelimit.go         # 按 IP 令牌桶 + 空闲淘汰
+│   │   ├── cors.go              # fail-closed CORS（按 origin 精确匹配）
+│   │   ├── headers.go           # 安全响应头（每个响应都带）
 │   │   ├── errors.go            # 绑定错误 -> 统一错误响应的翻译层
 │   │   ├── requestid.go         # Request ID 生成、校验、context 传递
 │   │   ├── logging.go           # slog 访问日志中间件
@@ -655,6 +659,7 @@ server stopped with an error  error="config: PORT must be a number, got \"abc\""
 |------|--------|------|
 | `PORT` | `8080` | 监听端口，1~65535 |
 | `TRUSTED_PROXIES` | 空（谁都不信任） | 逗号分隔的可信代理 IP / CIDR |
+| `CORS_ALLOWED_ORIGINS` | 空（禁止所有跨域） | 逗号分隔的允许跨域来源；`*` 表示允许全部（见下） |
 | `READ_HEADER_TIMEOUT` | `5s` | 读取请求头的时长上限 |
 | `READ_TIMEOUT` | `10s` | 读取完整请求的时长上限 |
 | `WRITE_TIMEOUT` | `10s` | 写响应的时长上限 |
@@ -705,6 +710,49 @@ server stopped with an error  error="config: PORT must be a number, got \"abc\""
 ```bash
 TRUSTED_PROXIES="10.0.0.0/8,172.16.0.0/12" go run cmd/server/main.go
 ```
+
+关于 `CORS_ALLOWED_ORIGINS`：**默认为空（fail-closed）**，任何跨域请求都会被
+浏览器拒绝——这跟 `TRUSTED_PROXIES` 一样是有意的安全默认。CORS 只影响浏览器，
+同源调用和非浏览器客户端（curl、服务端到服务端）不受影响，所以这不会挡住 API
+的正常调用方。需要让某个前端站点跨域访问时才显式列出：
+
+```bash
+CORS_ALLOWED_ORIGINS="https://app.example.com,https://admin.example.com" \
+  go run cmd/server/main.go
+```
+
+匹配是**精确字符串相等**，不是子串匹配，所以 `https://app.example.com` 不会
+授权 `https://evilapp.example.com`。被命中的来源会原样回显为
+`Access-Control-Allow-Origin`（而不是通配符 `*`），这样才能配合凭据（Cookie、
+`Authorization`）使用——浏览器禁止通配符与凭据同时出现。`*` 仍可作为显式
+「全部放开」选项，但它和「未配置」是两回事：未配置是默认拒绝，`*` 是主动放开。
+来源必须是完整的 `http(s)://host` URL（`https://app.example.com`），裸主机名或
+缺少协议会被启动校验拒绝——因为它们永远匹配不上浏览器实际发送的 `Origin`，
+而一个静默不匹配的 CORS 配置是最难排查的。
+
+## 安全响应头与 CORS 中间件
+
+`internal/handler/headers.go` 的 `SecurityHeaders` 给**每一个响应**（包括 404、
+500、panic 后的 500）都附加一组浏览器安全头：
+
+| 头 | 值 | 作用 |
+|----|----|------|
+| `X-Content-Type-Options` | `nosniff` | 禁止 MIME 嗅探，防上传文件被当脚本执行 |
+| `X-Frame-Options` | `DENY` | 禁止被任何页面嵌入，防点击劫持 |
+| `X-XSS-Protection` | `0` | **关闭**旧版 IE/Edge 的 XSS 审计器（现代浏览器已移除，旧版反而是攻击面） |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` | 跨域时只发送 origin、剥掉路径与查询串 |
+| `Strict-Transport-Security` | `max-age=2592000; includeSubDomains` | 30 天内强制 HTTPS |
+| `Permissions-Policy` | `camera=(), microphone=(), geolocation=(), payment=()` | 禁用本 API 用不到的强权能 API |
+| `Cache-Control` | `no-store` | API 响应常带凭据，绝不进缓存 |
+
+这些头在 `c.Next()` 之前写入，所以即使 handler 提前 `Abort` 或超时，头也都在。
+`X-XSS-Protection` 设为 `0` 而非 `1; mode=block` 是有意的：旧审计器本身有绕过
+路径，现代浏览器已经移除它，开启它既无收益又有风险。
+
+`internal/handler/cors.go` 的 `CORS(allowed []string)` 见上一节的配置说明，
+同样在 `c.Next()` 之前完成 preflight 短路（OPTIONS 直接返回 204）。请求头白名单
+固定为 `Origin, Content-Type, Authorization, X-Request-Id`，**不回显**
+`Access-Control-Request-Headers`——回显等于「客户端要什么就批什么」，白名单形同虚设。
 
 ## 超时设置
 
@@ -852,19 +900,19 @@ IP 取自 `c.ClientIP()`，正确性依赖 `TRUSTED_PROXIES`。默认不信任�
 
 ## 下一步计划
 
-接数据库这件事拆成了三步，**步骤 A、B、C 都已完成**。
+接数据库这件事拆成了三步，**步骤 A、B、C 都已完成**，之后的中间件补充也已完成。
 
 | 步骤 | 内容 | 状态 |
 |------|------|------|
 | A | 连接池、就绪探针接上真实数据库、验证关闭顺序 | **已完成** |
 | B | 迁移机制 + `users` 表 + 注册接口 | **已完成** |
 | C | 登录 + JWT + refresh 轮转 + 限流 | **已完成** |
+| D | CORS（fail-closed）+ 安全响应头中间件 | **已完成** |
 
 ### 之后
 
-1. 补充中间件：CORS、安全响应头
-2. 使用 Docker 容器化部署（`Dockerfile` + `docker-compose.yml`）
-3. 尝试 Kubernetes 部署（`/api/health` 与 `/api/ready` 已可直接对接探针）
+1. 使用 Docker 容器化部署（`Dockerfile` + `docker-compose.yml`）
+2. 尝试 Kubernetes 部署（`/api/health` 与 `/api/ready` 已可直接对接探针）
 
 ---
 
@@ -872,6 +920,7 @@ IP 取自 `c.ClientIP()`，正确性依赖 `TRUSTED_PROXIES`。默认不信任�
 
 | 笔记 | 内容 |
 |------|------|
+| `notes/接入安全中间件-CORS与响应头.md` | 本轮：CORS fail-closed、安全响应头、中间件顺序与坑 |
 | `notes/接入 PostgreSQL 步骤C-登录JWT与限流.md` | 本轮：登录防枚举、JWT、refresh 哈希与轮转、限流 |
 | `notes/接入 PostgreSQL 步骤B-注册接口与分层落地.md` | 手写迁移器、bcrypt 陷阱、TOCTOU、分层落地 |
 | `notes/接入 PostgreSQL 步骤A-连接池与就绪探针.md` | 连接池、探针实证、两处凭据泄露的堵法 |

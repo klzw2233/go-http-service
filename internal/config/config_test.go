@@ -17,7 +17,7 @@ import (
 // value inherited from the developer's shell cannot make a case pass or
 // fail by accident.
 var envVars = []string{
-	"PORT", "TRUSTED_PROXIES",
+	"PORT", "TRUSTED_PROXIES", "CORS_ALLOWED_ORIGINS",
 	"READ_HEADER_TIMEOUT", "READ_TIMEOUT", "WRITE_TIMEOUT", "IDLE_TIMEOUT",
 	"SHUTDOWN_TIMEOUT", "REQUEST_TIMEOUT",
 	"MAX_BODY_BYTES", "LOG_LEVEL", "LOG_FORMAT",
@@ -65,6 +65,7 @@ func TestLoad_Defaults(t *testing.T) {
 
 	assert.Equal(t, DefaultPort, cfg.Port)
 	assert.Nil(t, cfg.TrustedProxies, "默认不信任任何代理")
+	assert.Nil(t, cfg.CORSAllowedOrigins, "默认不开放任何跨域来源")
 	assert.Equal(t, DefaultReadHeaderTimeout, cfg.ReadHeaderTimeout)
 	assert.Equal(t, DefaultReadTimeout, cfg.ReadTimeout)
 	assert.Equal(t, DefaultWriteTimeout, cfg.WriteTimeout)
@@ -88,22 +89,23 @@ func TestLoad_Defaults(t *testing.T) {
 
 func TestLoad_Overrides(t *testing.T) {
 	setEnv(t, map[string]string{
-		"PORT":                "9000",
-		"TRUSTED_PROXIES":     "10.0.0.1, 192.168.0.0/16 ,,  172.16.0.0/12",
-		"READ_HEADER_TIMEOUT": "2s",
-		"READ_TIMEOUT":        "20s",
-		"WRITE_TIMEOUT":       "25s",
-		"IDLE_TIMEOUT":        "2m",
-		"SHUTDOWN_TIMEOUT":    "30s",
-		"REQUEST_TIMEOUT":     "20s",
-		"MAX_BODY_BYTES":      "2048",
-		"LOG_LEVEL":           "debug",
-		"LOG_FORMAT":          "text",
-		"DATABASE_URL":        "postgres://app:pw@db:5432/svc",
-		"DB_MAX_CONNS":        "25",
-		"DB_CONNECT_TIMEOUT":  "3s",
-		"ACCESS_TOKEN_TTL":    "30m",
-		"REFRESH_TOKEN_TTL":   "48h",
+		"PORT":                 "9000",
+		"TRUSTED_PROXIES":      "10.0.0.1, 192.168.0.0/16 ,,  172.16.0.0/12",
+		"CORS_ALLOWED_ORIGINS": "https://app.example.com, https://admin.example.com",
+		"READ_HEADER_TIMEOUT":  "2s",
+		"READ_TIMEOUT":         "20s",
+		"WRITE_TIMEOUT":        "25s",
+		"IDLE_TIMEOUT":         "2m",
+		"SHUTDOWN_TIMEOUT":     "30s",
+		"REQUEST_TIMEOUT":      "20s",
+		"MAX_BODY_BYTES":       "2048",
+		"LOG_LEVEL":            "debug",
+		"LOG_FORMAT":           "text",
+		"DATABASE_URL":         "postgres://app:pw@db:5432/svc",
+		"DB_MAX_CONNS":         "25",
+		"DB_CONNECT_TIMEOUT":   "3s",
+		"ACCESS_TOKEN_TTL":     "30m",
+		"REFRESH_TOKEN_TTL":    "48h",
 	})
 
 	cfg, err := Load()
@@ -113,6 +115,8 @@ func TestLoad_Overrides(t *testing.T) {
 	assert.Equal(t, ":9000", cfg.Addr())
 	// Blank entries dropped, surrounding spaces trimmed.
 	assert.Equal(t, []string{"10.0.0.1", "192.168.0.0/16", "172.16.0.0/12"}, cfg.TrustedProxies)
+	assert.Equal(t, []string{"https://app.example.com", "https://admin.example.com"},
+		cfg.CORSAllowedOrigins)
 	assert.Equal(t, 2*time.Second, cfg.ReadHeaderTimeout)
 	assert.Equal(t, 20*time.Second, cfg.ReadTimeout)
 	assert.Equal(t, 25*time.Second, cfg.WriteTimeout)
@@ -202,6 +206,19 @@ func TestLoad_InvalidValues(t *testing.T) {
 			name:    "可信代理不是 IP 或 CIDR",
 			env:     map[string]string{"TRUSTED_PROXIES": "10.0.0.1,not-an-ip"},
 			wantErr: `TRUSTED_PROXIES: "not-an-ip" is neither an IP nor a CIDR`,
+		},
+		{
+			// A bare hostname or a missing scheme never matches the Origin
+			// a browser sends, and a silent non-match is the worst kind of
+			// CORS failure to debug, so reject it at startup.
+			name:    "CORS 来源不是完整 URL",
+			env:     map[string]string{"CORS_ALLOWED_ORIGINS": "app.example.com"},
+			wantErr: `CORS_ALLOWED_ORIGINS: "app.example.com" is not a valid origin`,
+		},
+		{
+			name:    "CORS 来源协议不是 http(s)",
+			env:     map[string]string{"CORS_ALLOWED_ORIGINS": "ftp://app.example.com"},
+			wantErr: `CORS_ALLOWED_ORIGINS: "ftp://app.example.com" must use an http or https scheme`,
 		},
 		{
 			name: "请求超时不短于写超时",

@@ -109,6 +109,26 @@ func TestEndToEnd(t *testing.T) {
 			assert.Regexp(t, `^[0-9a-f]{32}$`, id)
 		})
 
+		t.Run("安全响应头在真实服务器上生效", func(t *testing.T) {
+			resp, _ := srv.get(t, "/api/health")
+
+			assert.Equal(t, "nosniff", resp.Header.Get("X-Content-Type-Options"))
+			assert.Equal(t, "DENY", resp.Header.Get("X-Frame-Options"))
+			assert.Equal(t, "0", resp.Header.Get("X-XSS-Protection"))
+			assert.Equal(t, "strict-origin-when-cross-origin", resp.Header.Get("Referrer-Policy"))
+			assert.Contains(t, resp.Header.Get("Strict-Transport-Security"), "max-age=")
+			assert.Equal(t, "no-store", resp.Header.Get("Cache-Control"))
+		})
+
+		t.Run("CORS 未配置时跨域被拒绝", func(t *testing.T) {
+			// The default server configures no allowed origins, so a
+			// cross-origin request must get no Access-Control-Allow-Origin.
+			resp, _ := srv.getWithHeader(t, "/api/health", "Origin", "https://app.example.com")
+
+			assert.Empty(t, resp.Header.Get("Access-Control-Allow-Origin"),
+				"未配置 CORS_ALLOWED_ORIGINS 时应 fail-closed，不返回 ACAO")
+		})
+
 		t.Run("合法的 X-Request-Id 被透传", func(t *testing.T) {
 			const sent = "trace-abc-123"
 			resp, _ := srv.getWithHeader(t, "/api/health", "X-Request-Id", sent)
@@ -1033,7 +1053,7 @@ func freePort(t *testing.T) string {
 // developer's shell cannot influence a case.
 func envWith(overrides map[string]string) []string {
 	managed := []string{
-		"PORT", "TRUSTED_PROXIES",
+		"PORT", "TRUSTED_PROXIES", "CORS_ALLOWED_ORIGINS",
 		"READ_HEADER_TIMEOUT", "READ_TIMEOUT", "WRITE_TIMEOUT", "IDLE_TIMEOUT",
 		"SHUTDOWN_TIMEOUT", "REQUEST_TIMEOUT",
 		"MAX_BODY_BYTES", "LOG_LEVEL", "LOG_FORMAT",

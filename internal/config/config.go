@@ -90,6 +90,14 @@ type Config struct {
 	// address and a caller cannot forge its own IP. Env: TRUSTED_PROXIES.
 	TrustedProxies []string
 
+	// CORSAllowedOrigins lists the origins allowed to make credentialed
+	// cross-origin requests. Empty means deny every cross-origin request,
+	// so a browser will block a web app on a different host from calling
+	// the API (same-origin calls and non-browser clients are unaffected).
+	// Fail closed, like TRUSTED_PROXIES: an open default would let any
+	// site read responses. Env: CORS_ALLOWED_ORIGINS.
+	CORSAllowedOrigins []string
+
 	// The four http.Server timeouts. Env: READ_HEADER_TIMEOUT,
 	// READ_TIMEOUT, WRITE_TIMEOUT, IDLE_TIMEOUT.
 	ReadHeaderTimeout time.Duration
@@ -181,11 +189,12 @@ func Load() (*Config, error) {
 	}
 
 	cfg := &Config{
-		Port:           envString("PORT", DefaultPort),
-		TrustedProxies: envList("TRUSTED_PROXIES"),
-		LogFormat:      strings.ToLower(envString("LOG_FORMAT", DefaultLogFormat)),
-		DatabaseURL:    envString("DATABASE_URL", ""),
-		JWTSecret:      envString("JWT_SECRET", ""),
+		Port:               envString("PORT", DefaultPort),
+		TrustedProxies:     envList("TRUSTED_PROXIES"),
+		CORSAllowedOrigins: envList("CORS_ALLOWED_ORIGINS"),
+		LogFormat:          strings.ToLower(envString("LOG_FORMAT", DefaultLogFormat)),
+		DatabaseURL:        envString("DATABASE_URL", ""),
+		JWTSecret:          envString("JWT_SECRET", ""),
 	}
 
 	var err error
@@ -252,6 +261,16 @@ func (c *Config) validate() []error {
 			continue
 		}
 		errs = append(errs, fmt.Errorf("TRUSTED_PROXIES: %q is neither an IP nor a CIDR", p))
+	}
+
+	// Origins are validated rather than trusted verbatim: a typo'd
+	// CORS_ALLOWED_ORIGINS entry would otherwise silently fail to match,
+	// and the operator would debug a browser showing "blocked by CORS"
+	// with no hint why.
+	for _, o := range c.CORSAllowedOrigins {
+		if err := validateOrigin(o); err != nil {
+			errs = append(errs, fmt.Errorf("CORS_ALLOWED_ORIGINS: %w", err))
+		}
 	}
 
 	if c.MaxBodyBytes <= 0 {
@@ -331,6 +350,7 @@ func (c *Config) LogValue() slog.Value {
 	return slog.GroupValue(
 		slog.String("port", c.Port),
 		slog.Any("trusted_proxies", c.TrustedProxies),
+		slog.Any("cors_allowed_origins", c.CORSAllowedOrigins),
 		slog.String("read_header_timeout", c.ReadHeaderTimeout.String()),
 		slog.String("read_timeout", c.ReadTimeout.String()),
 		slog.String("write_timeout", c.WriteTimeout.String()),
@@ -405,6 +425,27 @@ func validatePort(p string) error {
 	}
 	if n < 1 || n > 65535 {
 		return fmt.Errorf("PORT must be between 1 and 65535, got %d", n)
+	}
+	return nil
+}
+
+// validateOrigin checks one CORS_ALLOWED_ORIGINS entry.
+//
+// The wildcard "*" is accepted as the one explicit "open" option — it is
+// still opt-in, never the default. Concrete origins must be an absolute URL
+// with an http(s) scheme and a host, because a bare hostname or a missing
+// scheme would never match the Origin the browser sends, and a silent
+// non-match is the worst kind of CORS failure to debug.
+func validateOrigin(o string) error {
+	if o == "*" {
+		return nil
+	}
+	u, err := url.Parse(o)
+	if err != nil || u.Host == "" {
+		return fmt.Errorf("%q is not a valid origin; use a full URL such as https://app.example.com or *", o)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("%q must use an http or https scheme", o)
 	}
 	return nil
 }

@@ -2,7 +2,7 @@
 
 > 文件位置：`go-http-service/CLAUDE.md`
 > 用途：告知 Claude Code 本项目的运行环境、约定与注意事项
-> 最后更新：2026-08-23（步骤 C：登录、JWT、refresh 轮转与限流）
+> 最后更新：2026-08-23（步骤 D：CORS fail-closed 与安全响应头中间件）
 
 ---
 
@@ -254,6 +254,7 @@ refresh token 和密码都是凭据，都不能明文入库。但 refresh token 
 |------|--------|------|
 | `PORT` | `8080` | 服务监听端口 |
 | `TRUSTED_PROXIES` | 空（谁都不信任） | 逗号分隔的可信代理 IP / CIDR |
+| `CORS_ALLOWED_ORIGINS` | 空（禁止所有跨域） | 逗号分隔的允许跨域来源，`*` 表示全部；留空 = fail-closed |
 | `REQUEST_TIMEOUT` | `8s` | 单请求处理超时，必须小于 `WRITE_TIMEOUT` |
 | `DATABASE_URL` | **必需** | PostgreSQL 连接串 |
 | `JWT_SECRET` | **必需**，≥32 字节 | HS256 密钥，必须在 `LogValue()` 脱敏 |
@@ -292,6 +293,8 @@ internal/handler/           HTTP 层
   ready.go                  /api/ready   readiness，并发跑依赖检查
   auth.go                   登录 / 刷新 / 登出 / me、认证中间件
   ratelimit.go              按 IP 令牌桶 + 空闲淘汰
+  cors.go                   fail-closed CORS（按 origin 精确匹配）
+  headers.go                安全响应头（每个响应都带）
   info.go / echo.go
   errors.go                 绑定错误 -> 统一错误响应的翻译层
   requestid.go              Request ID 生成、校验、context 传递
@@ -306,16 +309,25 @@ notes/                      中文学习笔记
 `router.go` 里的注册顺序是有讲究的，改错会静默产生错误的日志：
 
 ```
-requestID      →  最先，后续所有日志才带得上 ID
-requestLogger  →  紧随其后，才能量到完整耗时
-CustomRecovery →  在 logger 内层
-timeout        →  设置 deadline
-limitBodySize  →  最后
+requestID       →  最先，后续所有日志才带得上 ID
+requestLogger   →  紧随其后，才能量到完整耗时
+CustomRecovery  →  在 logger 内层
+timeout         →  设置 deadline
+limitBodySize   →  请求体上限
+SecurityHeaders →  安全响应头，写在 c.Next() 之前，500/404 也带得上
+CORS            →  最后；fail-closed，未配置时不加任何 Access-Control-* 头
 ```
 
 **Recovery 故意不放最外层**，这与 gin 的常规写法相反。若 Recovery 在最外层，
 handler panic 时异常会穿过 `requestLogger` 的 `c.Next()`，此时 Recovery 还没
 把状态码置为 500，访问日志会记成错误的状态码。
+
+**安全头与 CORS 都在 `limitBodySize` 之后注册**。两者都在 `c.Next()` 之前写头，
+所以即便是超时后的 503、handler 提前 `Abort` 的 404、或 panic 后的 500，
+响应也都带得上安全头；CORS 的 preflight 在 `c.Next()` 之前就 `AbortWithStatus(204)`。
+CORS 默认 fail-closed：`CORS_ALLOWED_ORIGINS` 留空时不回任何 `Access-Control-*`，
+浏览器拒绝全部跨域请求——同源与非浏览器客户端不受影响，不要为了「图省事」
+把默认改成 `*`。
 
 ---
 
@@ -337,7 +349,7 @@ handler panic 时异常会穿过 `requestLogger` 的 `c.Next()`，此时 Recover
 3. ~~接 PostgreSQL 步骤 A：连接池 + 就绪探针接上真实数据库~~ 已完成
 4. ~~接 PostgreSQL 步骤 B：迁移机制 + `users` 表 + 注册接口~~ 已完成
 5. ~~接 PostgreSQL 步骤 C：登录 + JWT + refresh 轮转 + 限流~~ 已完成
-6. 补充中间件：CORS、安全响应头
+6. ~~补充中间件：CORS、安全响应头~~ 已完成
 7. 使用 Docker 容器化部署
 8. 尝试 Kubernetes 部署
 
@@ -349,6 +361,19 @@ handler panic 时异常会穿过 `requestLogger` 的 `c.Next()`，此时 Recover
 - refresh 存 SHA-256 不是 bcrypt；轮转走 `TryRotate`；重放才全家撤销
 - 探针不限流；登录 / 刷新 / 登出走更严的桶；内存限流每副本独立
 - 认证中间件在 timeout 之后、具体路由之前
+
+### 步骤 D 已落地的规矩（后续直接沿用）
+
+- **CORS fail-closed**：`CORS_ALLOWED_ORIGINS` 留空时不回任何 `Access-Control-*`，
+  浏览器拒绝全部跨域。不要为了方便把默认改成 `*`
+- CORS 按 origin **精确字符串匹配**，不做子串匹配；被命中的来源原样回显为
+  `Access-Control-Allow-Origin`（非通配符），配合 `Allow-Credentials: true`
+  让凭据类请求可用。`*` 仍是合法的显式「全部放开」选项
+- 请求头白名单固定（`corsHeaders`），**不回显** `Access-Control-Request-Headers`
+- 安全响应头**无配置项**，写在 `c.Next()` 之前，所以 500/404/超时都带得上
+- `X-XSS-Protection` 设为 `0`（关闭旧审计器），不是 `1; mode=block`——
+  现代浏览器已移除该机制，旧版本反而是攻击面
+- API 响应一律 `Cache-Control: no-store`，因为常带凭据
 
 ### 已经立好的规矩（后续直接沿用）
 
