@@ -28,6 +28,10 @@ import (
 // from a dozen places and the database is now required by all of them.
 var testDSN string
 
+// testJWTSecret signs tokens for the started servers. Exactly at the
+// minimum length, so the same value exercises the length rule.
+const testJWTSecret = "e2e-0123456789abcdef0123456789ab"
+
 // TestEndToEnd builds the real binary, runs it as a real process, and
 // drives it over a real TCP connection.
 //
@@ -246,6 +250,18 @@ func TestEndToEnd(t *testing.T) {
 				env:     map[string]string{"DATABASE_URL": ""},
 				wantMsg: "DATABASE_URL is required",
 			},
+			{
+				name:    "缺少 JWT 密钥",
+				env:     map[string]string{"JWT_SECRET": ""},
+				wantMsg: "JWT_SECRET is required",
+			},
+			{
+				// A short HMAC key can be recovered offline from any
+				// captured token, after which anyone can mint tokens.
+				name:    "JWT 密钥过短",
+				env:     map[string]string{"JWT_SECRET": "too-short"},
+				wantMsg: "JWT_SECRET must be at least 32 bytes",
+			},
 		}
 
 		for _, tt := range tests {
@@ -330,6 +346,16 @@ func TestEndToEnd(t *testing.T) {
 			// Host and database survive redaction, which is what makes
 			// the record useful for confirming where it connected.
 			assert.Contains(t, logged, "go_http_service")
+		})
+
+		t.Run("启动日志不含 JWT 密钥", func(t *testing.T) {
+			assert.NotContains(t, srv.output(), testJWTSecret,
+				"启动日志泄露了 JWT 密钥")
+
+			rec := srv.recordWithMsg(t, "server listening")
+			cfg, ok := rec["config"].(map[string]any)
+			require.True(t, ok, "config 应作为分组字段输出: %v", rec["config"])
+			assert.Equal(t, "(set)", cfg["jwt_secret"], "只应报告是否已配置")
 		})
 
 		// This is the assertion the whole step exists for. The ordering
@@ -432,6 +458,216 @@ func TestEndToEnd(t *testing.T) {
 		})
 	})
 
+	// The full credential lifecycle against a real process: an account
+	// is created, exchanged for a token, and the token opens a door that
+	// is otherwise shut.
+	t.Run("登录与受保护接口", func(t *testing.T) {
+		// Auth exercises login/refresh/logout many times from one address.
+		// The dedicated rate-limit case already covers the tight budget;
+		// this one needs enough headroom to finish the credential lifecycle.
+		srv := startServer(t, bin, map[string]string{
+			"LOGIN_RATE_LIMIT_RPM":   "60",
+			"LOGIN_RATE_LIMIT_BURST": "30",
+		})
+
+		username := fmt.Sprintf("auth%d", time.Now().UnixNano())
+		cleanupUsers(t, username)
+
+		const password = "correct-horse-battery"
+		register := fmt.Sprintf(
+			`{"username":%q,"email":"%s@example.com","password":%q}`,
+			username, username, password)
+
+		resp, raw := srv.post(t, "/api/users", register)
+		require.Equal(t, http.StatusCreated, resp.StatusCode, "body: %s", raw)
+
+		credentials := fmt.Sprintf(`{"username":%q,"password":%q}`, username, password)
+
+		var (
+			token      string
+			refresh    string
+			oldRefresh string
+		)
+
+		t.Run("登录返回 access 与 refresh", func(t *testing.T) {
+			resp, raw := srv.post(t, "/api/auth/login", credentials)
+			require.Equal(t, http.StatusOK, resp.StatusCode, "body: %s", raw)
+
+			var pair struct {
+				AccessToken  string    `json:"access_token"`
+				RefreshToken string    `json:"refresh_token"`
+				TokenType    string    `json:"token_type"`
+				ExpiresAt    time.Time `json:"expires_at"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(raw), &pair))
+
+			assert.NotEmpty(t, pair.AccessToken)
+			assert.NotEmpty(t, pair.RefreshToken)
+			assert.Equal(t, "Bearer", pair.TokenType)
+			assert.True(t, pair.ExpiresAt.After(time.Now()), "token 应尚未过期")
+
+			// A JWT has three dot-separated parts.
+			assert.Len(t, strings.Split(pair.AccessToken, "."), 3)
+
+			token = pair.AccessToken
+			refresh = pair.RefreshToken
+		})
+
+		t.Run("refresh token 入库的是哈希", func(t *testing.T) {
+			require.NotEmpty(t, refresh, "依赖前一个子测试拿到的 refresh token")
+
+			hash := activeRefreshHash(t, username)
+			assert.Len(t, hash, 64, "SHA-256 十六进制固定 64 字符")
+			assert.NotEqual(t, refresh, hash, "库里绝不能是 token 原文")
+			assert.NotContains(t, hash, "$2", "refresh token 不该用 bcrypt")
+		})
+
+		t.Run("登录响应不含用户信息", func(t *testing.T) {
+			_, raw := srv.post(t, "/api/auth/login", credentials)
+
+			for _, leak := range []string{"password", "$2a$", "@example.com", "token_hash"} {
+				assert.NotContains(t, raw, leak, "登录响应泄露了 %q", leak)
+			}
+		})
+
+		t.Run("带 token 可以访问 me", func(t *testing.T) {
+			require.NotEmpty(t, token, "依赖前一个子测试拿到的 token")
+
+			resp, raw := srv.getWithHeader(t, "/api/auth/me", "Authorization", "Bearer "+token)
+
+			require.Equal(t, http.StatusOK, resp.StatusCode, "body: %s", raw)
+			assert.Contains(t, raw, username)
+			assert.NotContains(t, raw, "password")
+		})
+
+		t.Run("不带 token 访问 me 返回 401", func(t *testing.T) {
+			resp, raw := srv.get(t, "/api/auth/me")
+
+			require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+			assert.Contains(t, raw, `"code":"UNAUTHORIZED"`)
+			assert.Equal(t, `Bearer realm="api"`, resp.Header.Get("WWW-Authenticate"))
+		})
+
+		// Every rejection must look the same, so a caller learns nothing
+		// about how close their credential was to working.
+		t.Run("各种无效 token 的响应完全一致", func(t *testing.T) {
+			var bodies []string
+
+			for _, header := range []string{
+				"",
+				"Bearer",
+				"Bearer not-a-jwt",
+				"Basic " + token,
+				"Bearer " + token + "tampered",
+			} {
+				resp, raw := srv.getWithHeader(t, "/api/auth/me", "Authorization", header)
+				require.Equal(t, http.StatusUnauthorized, resp.StatusCode,
+					"header %q 应被拒绝，实际 %d", header, resp.StatusCode)
+				bodies = append(bodies, raw)
+			}
+
+			for i := 1; i < len(bodies); i++ {
+				assert.Equal(t, bodies[0], bodies[i],
+					"第 %d 种无效 token 的响应与其他不同", i)
+			}
+		})
+
+		t.Run("密码错误与用户不存在响应一致", func(t *testing.T) {
+			_, wrongPassword := srv.post(t, "/api/auth/login",
+				fmt.Sprintf(`{"username":%q,"password":"definitely-wrong"}`, username))
+
+			_, noSuchUser := srv.post(t, "/api/auth/login",
+				`{"username":"nobody-at-all-12345","password":"definitely-wrong"}`)
+
+			assert.Equal(t, wrongPassword, noSuchUser,
+				"两者响应必须一模一样，否则接口就是用户名枚举器")
+		})
+
+		t.Run("刷新返回新的一对", func(t *testing.T) {
+			require.NotEmpty(t, refresh, "依赖登录拿到的 refresh token")
+
+			resp, raw := srv.post(t, "/api/auth/refresh",
+				fmt.Sprintf(`{"refresh_token":%q}`, refresh))
+			require.Equal(t, http.StatusOK, resp.StatusCode, "body: %s", raw)
+
+			var pair struct {
+				AccessToken  string `json:"access_token"`
+				RefreshToken string `json:"refresh_token"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(raw), &pair))
+
+			assert.NotEmpty(t, pair.AccessToken)
+			assert.NotEmpty(t, pair.RefreshToken)
+			assert.NotEqual(t, refresh, pair.RefreshToken, "轮转必须换发新的 refresh token")
+			assert.Len(t, strings.Split(pair.AccessToken, "."), 3)
+
+			oldRefresh = refresh
+			token = pair.AccessToken
+			refresh = pair.RefreshToken
+		})
+
+		t.Run("重放已用过的 refresh 返回 401", func(t *testing.T) {
+			require.NotEmpty(t, oldRefresh, "依赖刷新子测试留下的旧 token")
+
+			resp, replay := srv.post(t, "/api/auth/refresh",
+				fmt.Sprintf(`{"refresh_token":%q}`, oldRefresh))
+			require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+			assert.Contains(t, replay, `"code":"UNAUTHORIZED"`)
+
+			_, unknown := srv.post(t, "/api/auth/refresh",
+				`{"refresh_token":"not-a-real-token"}`)
+			assert.Equal(t, unknown, replay,
+				"重放与无效 token 的响应必须一模一样")
+		})
+
+		t.Run("登出后无法再刷新", func(t *testing.T) {
+			// Replay above family-revoked every session, so this path
+			// starts from a fresh login.
+			resp, raw := srv.post(t, "/api/auth/login", credentials)
+			require.Equal(t, http.StatusOK, resp.StatusCode, "body: %s", raw)
+
+			var pair struct {
+				RefreshToken string `json:"refresh_token"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(raw), &pair))
+			require.NotEmpty(t, pair.RefreshToken)
+
+			resp, raw = srv.post(t, "/api/auth/logout",
+				fmt.Sprintf(`{"refresh_token":%q}`, pair.RefreshToken))
+			require.Equal(t, http.StatusNoContent, resp.StatusCode, "body: %s", raw)
+			assert.Empty(t, raw)
+
+			resp, raw = srv.post(t, "/api/auth/refresh",
+				fmt.Sprintf(`{"refresh_token":%q}`, pair.RefreshToken))
+			require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+			assert.Contains(t, raw, `"code":"UNAUTHORIZED"`)
+		})
+	})
+
+	// Login carries its own, far tighter budget than the rest of the API.
+	t.Run("登录接口限流更严", func(t *testing.T) {
+		srv := startServer(t, bin, map[string]string{
+			"LOGIN_RATE_LIMIT_RPM":   "60",
+			"LOGIN_RATE_LIMIT_BURST": "3",
+		})
+
+		body := `{"username":"whoever","password":"whatever"}`
+
+		var statuses []int
+		for range 6 {
+			resp, _ := srv.post(t, "/api/auth/login", body)
+			statuses = append(statuses, resp.StatusCode)
+		}
+
+		assert.Contains(t, statuses, http.StatusTooManyRequests,
+			"连打登录接口应触发限流，实际状态码: %v", statuses)
+
+		// The probes stay reachable even while login is being throttled.
+		resp, _ := srv.get(t, "/api/health")
+		assert.Equal(t, http.StatusOK, resp.StatusCode,
+			"登录被限流时探针仍须可用")
+	})
+
 	t.Run("数据库连不上时拒绝启动", func(t *testing.T) {
 		cmd := exec.Command(bin)
 		// 192.0.2.1 是 RFC 5737 保留的不可路由地址。
@@ -498,9 +734,10 @@ func startServer(t *testing.T, bin string, env map[string]string) *server {
 
 	full := map[string]string{
 		"PORT": port,
-		// Required for the process to start at all. A caller can still
-		// override it, which is how the unreachable-database case works.
+		// Both required for the process to start at all. A caller can
+		// still override either, which is how the failure cases work.
 		"DATABASE_URL": testDSN,
+		"JWT_SECRET":   testJWTSecret,
 	}
 	for k, v := range env {
 		full[k] = v
@@ -536,12 +773,24 @@ func startServer(t *testing.T, bin string, env map[string]string) *server {
 	return s
 }
 
-// waitUntilServing polls until the health endpoint answers.
+// waitUntilServing polls until the health endpoint answers, or fails
+// fast if the process gave up first.
 func (s *server) waitUntilServing(t *testing.T) {
 	t.Helper()
 
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
+		// A process that exited closes its end of the pipe, which ends
+		// the scanner and closes logsDone. Checking that turns a
+		// configuration error from a ten-second wait into an immediate
+		// failure carrying the reason - six such cases used to cost a
+		// minute between them.
+		select {
+		case <-s.logsDone:
+			t.Fatalf("服务启动失败并已退出，日志:\n%s", s.output())
+		default:
+		}
+
 		resp, err := http.Get(s.url("/api/health"))
 		if err == nil {
 			_ = resp.Body.Close()
@@ -607,6 +856,27 @@ func (s *server) post(t *testing.T, path, body string) (*http.Response, string) 
 	require.NoError(t, err)
 
 	return resp, string(raw)
+}
+
+// activeRefreshHash returns the newest unrevoked refresh-token hash for
+// username. Used to prove the raw token never lands in the database.
+func activeRefreshHash(t *testing.T, username string) string {
+	t.Helper()
+
+	ctx := t.Context()
+	pool, err := pgxpool.New(ctx, testDSN)
+	require.NoError(t, err)
+	defer pool.Close()
+
+	var hash string
+	err = pool.QueryRow(ctx, `
+		SELECT token_hash FROM refresh_tokens
+		WHERE user_id = (SELECT id FROM users WHERE username = $1)
+		  AND revoked_at IS NULL
+		ORDER BY created_at DESC
+		LIMIT 1`, username).Scan(&hash)
+	require.NoError(t, err)
+	return hash
 }
 
 // cleanupUsers removes the accounts a test created. The development
@@ -768,6 +1038,9 @@ func envWith(overrides map[string]string) []string {
 		"SHUTDOWN_TIMEOUT", "REQUEST_TIMEOUT",
 		"MAX_BODY_BYTES", "LOG_LEVEL", "LOG_FORMAT",
 		"DATABASE_URL", "DB_MAX_CONNS", "DB_CONNECT_TIMEOUT",
+		"RATE_LIMIT_RPS", "RATE_LIMIT_BURST",
+		"LOGIN_RATE_LIMIT_RPM", "LOGIN_RATE_LIMIT_BURST",
+		"JWT_SECRET", "ACCESS_TOKEN_TTL", "REFRESH_TOKEN_TTL",
 	}
 
 	drop := make(map[string]bool, len(managed))
@@ -783,9 +1056,9 @@ func envWith(overrides map[string]string) []string {
 		env = append(env, kv)
 	}
 
-	// Seeded before the overrides so a case can blank it to exercise the
-	// missing-database path.
-	env = append(env, "DATABASE_URL="+testDSN)
+	// Seeded before the overrides so a case can blank either to exercise
+	// the missing-configuration paths.
+	env = append(env, "DATABASE_URL="+testDSN, "JWT_SECRET="+testJWTSecret)
 
 	for k, v := range overrides {
 		env = append(env, k+"="+v)
