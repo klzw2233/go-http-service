@@ -33,6 +33,7 @@
 | 登录与 JWT | `POST /api/auth/login`，HS256，失败响应完全一致 |
 | Refresh 轮转 | 每次刷新作废旧 token；重放则撤销该用户全部会话 |
 | 按 IP 限流 | 全局宽松 + 登录严格，探针豁免；内存实现，每副本独立 |
+| 容器化 | 多阶段 distroless 镜像（非 root、无 shell、~10MB）+ compose 编排 app+db |
 | 测试 | 单元 + 端到端（启动真实进程走真实 TCP），CI 跑竞态检测与 govulncheck |
 
 ---
@@ -92,8 +93,11 @@ go-http-service/
 │       ├── error.go             # ErrorResponse、错误码常量
 │       └── model_test.go
 ├── notes/                       # 中文学习笔记
-├── .github/workflows/ci.yml     # CI：换行符 / gofmt / vet / build / race / tidy
+├── .github/workflows/ci.yml     # CI：换行符 / gofmt / vet / build / race / tidy / 镜像构建
 ├── .gitattributes               # 换行符规范（LF）
+├── Dockerfile                   # 多阶段构建：golang:1.26 编译 → distroless static 运行
+├── docker-compose.yml           # app + postgres 一键编排
+├── .dockerignore                # 构建上下文裁剪
 ├── CLAUDE.md                    # 项目环境与开发约定
 ├── go.mod                       # Go 模块定义
 ├── go.sum                       # 依赖校验和
@@ -302,7 +306,45 @@ go build -ldflags "-X go-http-service/internal/model.Version=$(git describe --ta
   -o server ./cmd/server
 ```
 
-### 5. 运行测试
+### 5. Docker Compose 一键启动
+
+不想装 Go、也不想手动起 PostgreSQL，直接用 Compose 把 app + 数据库一起拉起来。
+`Dockerfile` 是多阶段构建：第一阶段用 `golang:1.26` 编译静态二进制
+（`CGO_ENABLED=0`，注入 version），第二阶段用
+`gcr.io/distroless/static-debian12:nonroot`，镜像 ~10MB、无 shell、非 root 运行。
+
+```bash
+# JWT_SECRET 是必需项，从宿主机环境变量读，不写进 compose 文件
+export JWT_SECRET="$(openssl rand -base64 48)"
+
+# --wait 会等到 db 的 healthcheck 通过
+docker compose up -d --wait
+
+curl http://localhost:8080/api/health          # 存活
+curl http://localhost:8080/api/ready            # 就绪，应报告 database=ok
+curl http://localhost:8080/api/info            # version 字段是注入的 dev
+```
+
+几个要点：
+
+- `DATABASE_URL` 里 host 写的是 compose 服务名 `db`，不是 `127.0.0.1`——
+  容器之间走 compose 网络，`127.0.0.1` 会指 app 容器自己，连不到数据库。
+- `JWT_SECRET` 用 `${JWT_SECRET:?...}` 从宿主机读，**不写进文件**（会进 git）。
+  未设置时 `compose up` 直接报错，而不是静默用空值。
+- `depends_on: db: condition: service_healthy` 让 app 等 db 就绪后启动，
+  避免 app 首次连接就失败的启动竞态。
+- db 映射 `127.0.0.1:5433:5432`，和本机开发库约定一致，只绑回环不暴露公网。
+- 手动构建镜像（不走 compose）：`docker build --build-arg VERSION=dev -t go-http-service:dev .`
+
+停掉并清理（连数据卷一起删）：
+
+```bash
+docker compose down -v
+```
+
+只停服务、保留数据：`docker compose down`（去掉 `-v`）。
+
+### 6. 运行测试
 
 ```bash
 go test ./...
@@ -900,7 +942,7 @@ IP 取自 `c.ClientIP()`，正确性依赖 `TRUSTED_PROXIES`。默认不信任�
 
 ## 下一步计划
 
-接数据库这件事拆成了三步，**步骤 A、B、C 都已完成**，之后的中间件补充也已完成。
+接数据库这件事拆成了三步，**步骤 A、B、C 都已完成**，之后的中间件补充与容器化也已完成。
 
 | 步骤 | 内容 | 状态 |
 |------|------|------|
@@ -908,11 +950,12 @@ IP 取自 `c.ClientIP()`，正确性依赖 `TRUSTED_PROXIES`。默认不信任�
 | B | 迁移机制 + `users` 表 + 注册接口 | **已完成** |
 | C | 登录 + JWT + refresh 轮转 + 限流 | **已完成** |
 | D | CORS（fail-closed）+ 安全响应头中间件 | **已完成** |
+| E | Docker 容器化（多阶段 distroless 镜像 + compose 编排） | **已完成** |
 
 ### 之后
 
-1. 使用 Docker 容器化部署（`Dockerfile` + `docker-compose.yml`）
-2. 尝试 Kubernetes 部署（`/api/health` 与 `/api/ready` 已可直接对接探针）
+1. 尝试 Kubernetes 部署（`/api/health` 与 `/api/ready` 已可直接对接探针；
+   `SIGTERM` 优雅关闭已就绪，K8s 滚动更新可直接用）
 
 ---
 
