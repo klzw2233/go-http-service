@@ -126,7 +126,9 @@ jobs:
         uses: actions/checkout@v7
 
       - name: 设置 Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        # v4 migrated to the Node 24 runtime; v3 still uses Node 20 and
+        # triggers GitHub's Node 20 deprecation warning on every run.
+        uses: docker/setup-buildx-action@v4
 
       - name: 构建镜像
         uses: docker/build-push-action@v6
