@@ -27,10 +27,11 @@ type stubAuthenticator struct {
 	user   *model.User
 	err    error
 
-	ctx      context.Context
-	username string
-	password string
-	lookedUp int64
+	ctx          context.Context
+	username     string
+	password     string
+	refreshToken string
+	lookedUp     int64
 }
 
 func (s *stubAuthenticator) Login(ctx context.Context, username, password string) (*service.LoginResult, error) {
@@ -40,6 +41,21 @@ func (s *stubAuthenticator) Login(ctx context.Context, username, password string
 		return nil, s.err
 	}
 	return s.result, nil
+}
+
+func (s *stubAuthenticator) Refresh(ctx context.Context, token string) (*service.LoginResult, error) {
+	s.ctx = ctx
+	s.refreshToken = token
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.result, nil
+}
+
+func (s *stubAuthenticator) Logout(ctx context.Context, token string) error {
+	s.ctx = ctx
+	s.refreshToken = token
+	return s.err
 }
 
 func (s *stubAuthenticator) UserByID(ctx context.Context, id int64) (*model.User, error) {
@@ -77,11 +93,14 @@ func authedUser() *model.User {
 	}
 }
 
+const testRefreshToken = "refresh-raw-value"
+
 func loginResult() *service.LoginResult {
 	return &service.LoginResult{
-		User:        authedUser(),
-		AccessToken: testAccessToken,
-		ExpiresAt:   fixedTime.Add(15 * time.Minute),
+		User:         authedUser(),
+		AccessToken:  testAccessToken,
+		RefreshToken: testRefreshToken,
+		ExpiresAt:    fixedTime.Add(15 * time.Minute),
 	}
 }
 
@@ -105,6 +124,7 @@ func TestLogin_Succeeds(t *testing.T) {
 	requireJSONResponse(t, w, http.StatusOK, &got)
 
 	assert.Equal(t, testAccessToken, got.AccessToken)
+	assert.Equal(t, testRefreshToken, got.RefreshToken)
 	assert.Equal(t, "Bearer", got.TokenType)
 	assert.True(t, got.ExpiresAt.Equal(fixedTime.Add(15*time.Minute)))
 
@@ -121,7 +141,8 @@ func TestLogin_ResponseCarriesNoUserData(t *testing.T) {
 		doOn(t, authRouter(t, &stubAuthenticator{result: loginResult()}, &stubVerifier{}))
 
 	body := w.Body.String()
-	for _, leak := range []string{"password", "$2a$", "jimmy@example.com", "email"} {
+	assert.Contains(t, body, `"refresh_token"`)
+	for _, leak := range []string{"password", "$2a$", "jimmy@example.com", "email", "token_hash"} {
 		assert.NotContains(t, body, leak, "登录响应泄露了 %q: %s", leak, body)
 	}
 }
@@ -359,4 +380,83 @@ func TestUserIDFrom_EmptyContext(t *testing.T) {
 
 	_, ok := UserIDFrom(t.Context())
 	assert.False(t, ok)
+}
+
+const validRefreshBody = `{"refresh_token":"refresh-raw-value"}`
+
+func TestRefresh_Succeeds(t *testing.T) {
+	t.Parallel()
+
+	stub := &stubAuthenticator{result: loginResult()}
+
+	w := request{method: http.MethodPost, path: "/api/auth/refresh", body: validRefreshBody}.
+		doOn(t, authRouter(t, stub, &stubVerifier{}))
+
+	var got model.TokenPair
+	requireJSONResponse(t, w, http.StatusOK, &got)
+
+	assert.Equal(t, testAccessToken, got.AccessToken)
+	assert.Equal(t, testRefreshToken, got.RefreshToken)
+	assert.Equal(t, testRefreshToken, stub.refreshToken)
+}
+
+func TestRefresh_InvalidToken(t *testing.T) {
+	t.Parallel()
+
+	w := request{method: http.MethodPost, path: "/api/auth/refresh", body: validRefreshBody}.
+		doOn(t, authRouter(t, &stubAuthenticator{err: service.ErrInvalidCredentials}, &stubVerifier{}))
+
+	var got model.ErrorResponse
+	requireJSONResponse(t, w, http.StatusUnauthorized, &got)
+	assert.Equal(t, model.ErrCodeUnauthorized, got.Code)
+	assert.Equal(t, `Bearer realm="api"`, w.Header().Get("WWW-Authenticate"))
+}
+
+func TestRefresh_ReplayLooksLikeAnyOther401(t *testing.T) {
+	t.Parallel()
+
+	invalid := request{method: http.MethodPost, path: "/api/auth/refresh", body: validRefreshBody}.
+		doOn(t, authRouter(t, &stubAuthenticator{err: service.ErrInvalidCredentials}, &stubVerifier{}))
+
+	replay := request{method: http.MethodPost, path: "/api/auth/refresh", body: validRefreshBody}.
+		doOn(t, authRouter(t, &stubAuthenticator{err: service.ErrRefreshTokenReused}, &stubVerifier{}))
+
+	require.Equal(t, http.StatusUnauthorized, replay.Code)
+	assert.Equal(t, invalid.Body.String(), replay.Body.String(),
+		"重放与无效 token 的响应体必须完全一致")
+}
+
+func TestRefresh_PassesRequestContext(t *testing.T) {
+	t.Parallel()
+
+	stub := &stubAuthenticator{result: loginResult()}
+	request{method: http.MethodPost, path: "/api/auth/refresh", body: validRefreshBody}.
+		doOn(t, authRouter(t, stub, &stubVerifier{}))
+
+	require.NotNil(t, stub.ctx)
+	_, hasDeadline := stub.ctx.Deadline()
+	assert.True(t, hasDeadline, "service 收到的 context 必须带请求超时")
+}
+
+func TestLogout_Succeeds(t *testing.T) {
+	t.Parallel()
+
+	stub := &stubAuthenticator{}
+	w := request{method: http.MethodPost, path: "/api/auth/logout", body: validRefreshBody}.
+		doOn(t, authRouter(t, stub, &stubVerifier{}))
+
+	assert.Equal(t, http.StatusNoContent, w.Code)
+	assert.Empty(t, w.Body.String())
+	assert.Equal(t, testRefreshToken, stub.refreshToken)
+}
+
+func TestLogout_InvalidToken(t *testing.T) {
+	t.Parallel()
+
+	w := request{method: http.MethodPost, path: "/api/auth/logout", body: validRefreshBody}.
+		doOn(t, authRouter(t, &stubAuthenticator{err: service.ErrInvalidCredentials}, &stubVerifier{}))
+
+	var got model.ErrorResponse
+	requireJSONResponse(t, w, http.StatusUnauthorized, &got)
+	assert.Equal(t, model.ErrCodeUnauthorized, got.Code)
 }

@@ -90,7 +90,8 @@ func run() error {
 		return fmt.Errorf("token issuer: %w", err)
 	}
 
-	authSvc, err := service.NewAuthService(userRepo, tokens)
+	refreshRepo := repository.NewRefreshTokenRepository(pool)
+	authSvc, err := service.NewAuthService(userRepo, tokens, refreshRepo, cfg.RefreshTokenTTL)
 	if err != nil {
 		return fmt.Errorf("auth service: %w", err)
 	}

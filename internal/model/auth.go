@@ -16,6 +16,9 @@ type LoginRequest struct {
 // TokenPair is what a successful login or refresh returns.
 type TokenPair struct {
 	AccessToken string `json:"access_token"`
+	// RefreshToken is the long-lived credential used to mint a new pair.
+	// It is shown once; the server stores only a hash of it.
+	RefreshToken string `json:"refresh_token"`
 	// TokenType is always "Bearer". Returned so a client can build the
 	// Authorization header without hardcoding the scheme.
 	TokenType string `json:"token_type"`
@@ -24,11 +27,17 @@ type TokenPair struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
-// NewTokenPair builds the response for an issued access token.
-func NewTokenPair(accessToken string, expiresAt time.Time) TokenPair {
+// RefreshRequest is the body of POST /api/auth/refresh and /api/auth/logout.
+type RefreshRequest struct {
+	RefreshToken string `json:"refresh_token" binding:"required"`
+}
+
+// NewTokenPair builds the response for a newly issued pair.
+func NewTokenPair(accessToken, refreshToken string, expiresAt time.Time) TokenPair {
 	return TokenPair{
-		AccessToken: accessToken,
-		TokenType:   "Bearer",
-		ExpiresAt:   expiresAt,
+		AccessToken:  accessToken,
+		RefreshToken: refreshToken,
+		TokenType:    "Bearer",
+		ExpiresAt:    expiresAt,
 	}
 }

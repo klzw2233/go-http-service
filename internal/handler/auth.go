@@ -35,7 +35,40 @@ func (a *API) Login(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, model.NewTokenPair(result.AccessToken, result.ExpiresAt))
+	c.JSON(http.StatusOK, model.NewTokenPair(result.AccessToken, result.RefreshToken, result.ExpiresAt))
+}
+
+// Refresh handles POST /api/auth/refresh.
+func (a *API) Refresh(c *gin.Context) {
+	var req model.RefreshRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		a.respondBindError(c, err)
+		return
+	}
+
+	result, err := a.auth.Refresh(c.Request.Context(), req.RefreshToken)
+	if err != nil {
+		a.respondAuthError(c, err, "refresh failed")
+		return
+	}
+
+	c.JSON(http.StatusOK, model.NewTokenPair(result.AccessToken, result.RefreshToken, result.ExpiresAt))
+}
+
+// Logout handles POST /api/auth/logout.
+func (a *API) Logout(c *gin.Context) {
+	var req model.RefreshRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		a.respondBindError(c, err)
+		return
+	}
+
+	if err := a.auth.Logout(c.Request.Context(), req.RefreshToken); err != nil {
+		a.respondAuthError(c, err, "logout failed")
+		return
+	}
+
+	c.Status(http.StatusNoContent)
 }
 
 // Me handles GET /api/auth/me, the first endpoint behind requireAuth.
@@ -118,6 +151,17 @@ func (a *API) respondUnauthorized(c *gin.Context) {
 
 // respondAuthError maps a service failure onto the HTTP contract.
 func (a *API) respondAuthError(c *gin.Context, err error, logMsg string) {
+	if errors.Is(err, service.ErrRefreshTokenReused) {
+		// Same 401 as any other auth failure. The distinct error exists
+		// so this line can be grepped when a stolen token is actually
+		// being used, which is a different event from a typo.
+		a.logFor(c).Warn("refresh token replay detected, all sessions revoked",
+			"method", c.Request.Method,
+			"path", c.Request.URL.Path)
+		a.respondUnauthorized(c)
+		return
+	}
+
 	if errors.Is(err, service.ErrInvalidCredentials) {
 		a.respondUnauthorized(c)
 		return

@@ -65,6 +65,12 @@ const (
 	// Continuity comes from the refresh token instead.
 	DefaultAccessTokenTTL = 15 * time.Minute
 
+	// Long enough that a human is not bounced back to a password prompt
+	// every afternoon, short enough that a stolen refresh token does
+	// not last a season. Rotation (and replay detection) is what
+	// actually bounds the damage of a leak.
+	DefaultRefreshTokenTTL = 720 * time.Hour
+
 	// MinJWTSecretLen mirrors auth.MinSecretLen. It is duplicated rather
 	// than imported because config must not depend on other internal
 	// packages; a test asserts the two stay equal.
@@ -148,6 +154,10 @@ type Config struct {
 	// Env: ACCESS_TOKEN_TTL.
 	AccessTokenTTL time.Duration
 
+	// RefreshTokenTTL is how long a refresh token stays valid.
+	// Env: REFRESH_TOKEN_TTL.
+	RefreshTokenTTL time.Duration
+
 	// LogLevel is the minimum level to emit. Env: LOG_LEVEL.
 	LogLevel slog.Level
 
@@ -211,6 +221,8 @@ func Load() (*Config, error) {
 	track(err)
 
 	cfg.AccessTokenTTL, err = envDuration("ACCESS_TOKEN_TTL", DefaultAccessTokenTTL)
+	track(err)
+	cfg.RefreshTokenTTL, err = envDuration("REFRESH_TOKEN_TTL", DefaultRefreshTokenTTL)
 	track(err)
 
 	cfg.LogLevel, err = envLogLevel("LOG_LEVEL", DefaultLogLevel)
@@ -335,6 +347,7 @@ func (c *Config) LogValue() slog.Value {
 		slog.Int64("login_rate_limit_burst", c.LoginRateLimitBurst),
 		slog.String("jwt_secret", redactSecret(c.JWTSecret)),
 		slog.String("access_token_ttl", c.AccessTokenTTL.String()),
+		slog.String("refresh_token_ttl", c.RefreshTokenTTL.String()),
 		slog.String("log_level", c.LogLevel.String()),
 		slog.String("log_format", c.LogFormat),
 	)

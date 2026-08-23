@@ -87,6 +87,8 @@ func SetupRouter(api *API) *gin.Engine {
 	authRoutes := r.Group(apiBasePath + "/auth")
 	{
 		authRoutes.POST("/login", api.rateLimit(loginLimiter), api.Login)
+		authRoutes.POST("/refresh", api.rateLimit(loginLimiter), api.Refresh)
+		authRoutes.POST("/logout", api.rateLimit(loginLimiter), api.Logout)
 
 		// Reads behind a token only need the global budget; they are
 		// bounded by having to hold a valid token in the first place.

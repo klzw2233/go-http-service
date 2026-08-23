@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/bcrypt"
 
+	"go-http-service/internal/auth"
 	"go-http-service/internal/model"
 	"go-http-service/internal/repository"
 )
@@ -58,6 +59,87 @@ func (s *stubIssuer) IssueAccess(userID int64) (string, time.Time, error) {
 	return s.token, time.Date(2026, 8, 23, 12, 15, 0, 0, time.UTC), nil
 }
 
+const testRefreshTTL = 30 * 24 * time.Hour
+
+type storedRefresh struct {
+	userID    int64
+	hash      string
+	expiresAt time.Time
+	revoked   bool
+}
+
+// stubRefreshStore records hashes so tests can prove the raw token never
+// lands in storage, and can drive rotate/replay without a database.
+type stubRefreshStore struct {
+	tokens map[string]*storedRefresh
+	err    error
+	ctx    context.Context
+}
+
+func newStubRefreshStore() *stubRefreshStore {
+	return &stubRefreshStore{tokens: make(map[string]*storedRefresh)}
+}
+
+func (s *stubRefreshStore) Store(ctx context.Context, userID int64, hash string, expiresAt time.Time) error {
+	s.ctx = ctx
+	if s.err != nil {
+		return s.err
+	}
+	s.tokens[hash] = &storedRefresh{userID: userID, hash: hash, expiresAt: expiresAt}
+	return nil
+}
+
+func (s *stubRefreshStore) TryRotate(ctx context.Context, oldHash, newHash string, newExpiry, now time.Time) (int64, error) {
+	s.ctx = ctx
+	if s.err != nil {
+		return 0, s.err
+	}
+
+	tok, ok := s.tokens[oldHash]
+	if !ok {
+		return 0, repository.ErrRefreshTokenNotFound
+	}
+	if tok.revoked {
+		for _, t := range s.tokens {
+			if t.userID == tok.userID {
+				t.revoked = true
+			}
+		}
+		return 0, repository.ErrRefreshTokenReused
+	}
+	if !tok.expiresAt.After(now) {
+		return 0, repository.ErrRefreshTokenNotFound
+	}
+
+	tok.revoked = true
+	s.tokens[newHash] = &storedRefresh{userID: tok.userID, hash: newHash, expiresAt: newExpiry}
+	return tok.userID, nil
+}
+
+func (s *stubRefreshStore) RevokeByHash(ctx context.Context, hash string, now time.Time) error {
+	s.ctx = ctx
+	if s.err != nil {
+		return s.err
+	}
+
+	tok, ok := s.tokens[hash]
+	if !ok || tok.revoked || !tok.expiresAt.After(now) {
+		return repository.ErrRefreshTokenNotFound
+	}
+	tok.revoked = true
+	return nil
+}
+
+func (s *stubRefreshStore) activeCount(userID int64) int {
+	n := 0
+	for _, tok := range s.tokens {
+		if tok.userID == userID && !tok.revoked {
+			n++
+		}
+	}
+	return n
+}
+
 // storedUser builds a user whose hash really matches testPassword, so
 // the comparison under test is a real bcrypt verification.
 func storedUser(t *testing.T) *model.User {
@@ -76,11 +158,17 @@ func storedUser(t *testing.T) *model.User {
 
 func newTestAuthService(t *testing.T, users userFinder, tokens tokenIssuer) *AuthService {
 	t.Helper()
+	return newTestAuthServiceWith(t, users, tokens, newStubRefreshStore())
+}
+
+func newTestAuthServiceWith(t *testing.T, users userFinder, tokens tokenIssuer, refresh refreshStore, extra ...AuthOption) *AuthService {
+	t.Helper()
 
 	// MinCost for the same reason the user service uses it: the default
 	// spends ~60ms per hash, which is correct in production and
 	// intolerable across a test file under -race.
-	svc, err := NewAuthService(users, tokens, WithAuthBcryptCost(bcrypt.MinCost))
+	opts := append([]AuthOption{WithAuthBcryptCost(bcrypt.MinCost)}, extra...)
+	svc, err := NewAuthService(users, tokens, refresh, testRefreshTTL, opts...)
 	require.NoError(t, err)
 
 	return svc
@@ -98,9 +186,30 @@ func TestLogin_Succeeds(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, user.ID, result.User.ID)
 	assert.Equal(t, "signed.jwt.value", result.AccessToken)
+	assert.NotEmpty(t, result.RefreshToken)
 	assert.False(t, result.ExpiresAt.IsZero())
 
 	assert.Equal(t, user.ID, issuer.userID, "签发的 token 应属于查到的那个用户")
+}
+
+func TestLogin_StoresHashNotRawToken(t *testing.T) {
+	t.Parallel()
+
+	store := newStubRefreshStore()
+	user := storedUser(t)
+
+	result, err := newTestAuthServiceWith(t, &stubUserFinder{user: user},
+		&stubIssuer{token: "t"}, store).
+		Login(t.Context(), testUsername, testPassword)
+	require.NoError(t, err)
+
+	require.Len(t, store.tokens, 1)
+	for hash, tok := range store.tokens {
+		assert.Equal(t, auth.HashRefresh(result.RefreshToken), hash)
+		assert.NotEqual(t, result.RefreshToken, hash)
+		assert.Equal(t, user.ID, tok.userID)
+		assert.False(t, tok.revoked)
+	}
 }
 
 // TestLogin_SameErrorForMissingUserAndWrongPassword is the rule that
@@ -155,11 +264,11 @@ func TestLogin_TimingIsComparable(t *testing.T) {
 	user.PasswordHash = string(realHash)
 
 	found, err := NewAuthService(&stubUserFinder{user: user}, &stubIssuer{},
-		WithAuthBcryptCost(cost))
+		newStubRefreshStore(), testRefreshTTL, WithAuthBcryptCost(cost))
 	require.NoError(t, err)
 
 	missing, err := NewAuthService(&stubUserFinder{err: repository.ErrUserNotFound},
-		&stubIssuer{}, WithAuthBcryptCost(cost))
+		&stubIssuer{}, newStubRefreshStore(), testRefreshTTL, WithAuthBcryptCost(cost))
 	require.NoError(t, err)
 
 	const samples = 7
@@ -261,7 +370,7 @@ func TestUserByID_DeletedAccountIsUnauthenticated(t *testing.T) {
 func TestNewAuthService_DefaultsToStandardCost(t *testing.T) {
 	t.Parallel()
 
-	svc, err := NewAuthService(&stubUserFinder{}, &stubIssuer{})
+	svc, err := NewAuthService(&stubUserFinder{}, &stubIssuer{}, newStubRefreshStore(), testRefreshTTL)
 	require.NoError(t, err)
 
 	cost, err := bcrypt.Cost(svc.dummyHash)
@@ -269,4 +378,145 @@ func TestNewAuthService_DefaultsToStandardCost(t *testing.T) {
 
 	assert.Equal(t, bcrypt.DefaultCost, cost,
 		"假哈希的成本必须与生产成本一致，否则两条路径的耗时又对不上了")
+}
+
+func TestNewAuthService_RejectsNonPositiveTTL(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewAuthService(&stubUserFinder{}, &stubIssuer{}, newStubRefreshStore(), 0)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must be positive")
+}
+
+func TestRefresh_Succeeds(t *testing.T) {
+	t.Parallel()
+
+	store := newStubRefreshStore()
+	user := storedUser(t)
+	issuer := &stubIssuer{token: "next.jwt"}
+
+	svc := newTestAuthServiceWith(t, &stubUserFinder{user: user}, issuer, store)
+
+	login, err := svc.Login(t.Context(), testUsername, testPassword)
+	require.NoError(t, err)
+
+	refreshed, err := svc.Refresh(t.Context(), login.RefreshToken)
+	require.NoError(t, err)
+
+	assert.Equal(t, "next.jwt", refreshed.AccessToken)
+	assert.NotEmpty(t, refreshed.RefreshToken)
+	assert.NotEqual(t, login.RefreshToken, refreshed.RefreshToken, "轮转必须换发新的 refresh token")
+	assert.Equal(t, user.ID, issuer.userID)
+	assert.Equal(t, 1, store.activeCount(user.ID))
+}
+
+func TestRefresh_ReplayRevokesFamily(t *testing.T) {
+	t.Parallel()
+
+	store := newStubRefreshStore()
+	user := storedUser(t)
+	svc := newTestAuthServiceWith(t, &stubUserFinder{user: user},
+		&stubIssuer{token: "t"}, store)
+
+	login, err := svc.Login(t.Context(), testUsername, testPassword)
+	require.NoError(t, err)
+
+	_, err = svc.Refresh(t.Context(), login.RefreshToken)
+	require.NoError(t, err)
+
+	_, err = svc.Refresh(t.Context(), login.RefreshToken)
+	require.ErrorIs(t, err, ErrRefreshTokenReused)
+	assert.Zero(t, store.activeCount(user.ID),
+		"重放已用过的 refresh token 应撤销该用户的全部会话")
+}
+
+func TestRefresh_UnknownToken(t *testing.T) {
+	t.Parallel()
+
+	_, err := newTestAuthService(t, &stubUserFinder{}, &stubIssuer{}).
+		Refresh(t.Context(), "not-a-real-token")
+
+	require.ErrorIs(t, err, ErrInvalidCredentials)
+	assert.NotErrorIs(t, err, ErrRefreshTokenReused,
+		"从未见过的 token 不是重放，不应触发全家撤销的语义")
+}
+
+func TestRefresh_ExpiredToken(t *testing.T) {
+	t.Parallel()
+
+	store := newStubRefreshStore()
+	user := storedUser(t)
+
+	start := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	clock := start
+	svc := newTestAuthServiceWith(t, &stubUserFinder{user: user},
+		&stubIssuer{token: "t"}, store, WithAuthClock(func() time.Time { return clock }))
+
+	login, err := svc.Login(t.Context(), testUsername, testPassword)
+	require.NoError(t, err)
+
+	clock = start.Add(testRefreshTTL + time.Second)
+
+	_, err = svc.Refresh(t.Context(), login.RefreshToken)
+	require.ErrorIs(t, err, ErrInvalidCredentials)
+}
+
+func TestLogout_RevokesToken(t *testing.T) {
+	t.Parallel()
+
+	store := newStubRefreshStore()
+	user := storedUser(t)
+	svc := newTestAuthServiceWith(t, &stubUserFinder{user: user},
+		&stubIssuer{token: "t"}, store)
+
+	login, err := svc.Login(t.Context(), testUsername, testPassword)
+	require.NoError(t, err)
+
+	require.NoError(t, svc.Logout(t.Context(), login.RefreshToken))
+	assert.Zero(t, store.activeCount(user.ID))
+
+	err = svc.Logout(t.Context(), login.RefreshToken)
+	require.ErrorIs(t, err, ErrInvalidCredentials,
+		"再次登出必须与无效 token 无法区分")
+}
+
+func TestLogout_DoesNotTreatReplayAsTheft(t *testing.T) {
+	t.Parallel()
+
+	store := newStubRefreshStore()
+	user := storedUser(t)
+	svc := newTestAuthServiceWith(t, &stubUserFinder{user: user},
+		&stubIssuer{token: "t"}, store)
+
+	first, err := svc.Login(t.Context(), testUsername, testPassword)
+	require.NoError(t, err)
+	second, err := svc.Login(t.Context(), testUsername, testPassword)
+	require.NoError(t, err)
+
+	require.NoError(t, svc.Logout(t.Context(), first.RefreshToken))
+	err = svc.Logout(t.Context(), first.RefreshToken)
+	require.ErrorIs(t, err, ErrInvalidCredentials)
+
+	assert.Equal(t, 1, store.activeCount(user.ID),
+		"对已撤销 token 再 logout 不应误杀其他会话")
+	assert.NoError(t, svc.Logout(t.Context(), second.RefreshToken))
+}
+
+func TestRefresh_PassesContextThrough(t *testing.T) {
+	t.Parallel()
+
+	type key struct{}
+	ctx := context.WithValue(t.Context(), key{}, "marker")
+
+	store := newStubRefreshStore()
+	user := storedUser(t)
+	svc := newTestAuthServiceWith(t, &stubUserFinder{user: user},
+		&stubIssuer{token: "t"}, store)
+
+	login, err := svc.Login(t.Context(), testUsername, testPassword)
+	require.NoError(t, err)
+
+	_, err = svc.Refresh(ctx, login.RefreshToken)
+	require.NoError(t, err)
+	assert.Equal(t, "marker", store.ctx.Value(key{}))
 }

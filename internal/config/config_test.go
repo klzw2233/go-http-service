@@ -24,7 +24,7 @@ var envVars = []string{
 	"DATABASE_URL", "DB_MAX_CONNS", "DB_CONNECT_TIMEOUT",
 	"RATE_LIMIT_RPS", "RATE_LIMIT_BURST",
 	"LOGIN_RATE_LIMIT_RPM", "LOGIN_RATE_LIMIT_BURST",
-	"JWT_SECRET", "ACCESS_TOKEN_TTL",
+	"JWT_SECRET", "ACCESS_TOKEN_TTL", "REFRESH_TOKEN_TTL",
 }
 
 // testDSN is a syntactically valid connection string. It is seeded by
@@ -83,6 +83,7 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, DefaultLoginRateLimitBurst, cfg.LoginRateLimitBurst)
 	assert.Equal(t, testJWTSecret, cfg.JWTSecret, "JWT_SECRET 是必需项，由 setEnv 注入")
 	assert.Equal(t, DefaultAccessTokenTTL, cfg.AccessTokenTTL)
+	assert.Equal(t, DefaultRefreshTokenTTL, cfg.RefreshTokenTTL)
 }
 
 func TestLoad_Overrides(t *testing.T) {
@@ -101,6 +102,8 @@ func TestLoad_Overrides(t *testing.T) {
 		"DATABASE_URL":        "postgres://app:pw@db:5432/svc",
 		"DB_MAX_CONNS":        "25",
 		"DB_CONNECT_TIMEOUT":  "3s",
+		"ACCESS_TOKEN_TTL":    "30m",
+		"REFRESH_TOKEN_TTL":   "48h",
 	})
 
 	cfg, err := Load()
@@ -122,6 +125,8 @@ func TestLoad_Overrides(t *testing.T) {
 	assert.Equal(t, "postgres://app:pw@db:5432/svc", cfg.DatabaseURL)
 	assert.Equal(t, int64(25), cfg.DBMaxConns)
 	assert.Equal(t, 3*time.Second, cfg.DBConnectTimeout)
+	assert.Equal(t, 30*time.Minute, cfg.AccessTokenTTL)
+	assert.Equal(t, 48*time.Hour, cfg.RefreshTokenTTL)
 }
 
 // TestLoad_EmptyMeansUnset pins that an explicitly empty variable falls

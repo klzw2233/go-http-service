@@ -88,6 +88,9 @@ func TestJSONFieldNames(t *testing.T) {
 		{"InfoResponse", NewInfoResponse(testTime), []string{"name", "version", "go_version", "timestamp"}},
 		{"EchoResponse", NewEchoResponse("x", testTime), []string{"message", "echoed_at"}},
 		{"EchoRequest", EchoRequest{Message: "x"}, []string{"message"}},
+		{"LoginRequest", LoginRequest{Username: "u", Password: "p"}, []string{"username", "password"}},
+		{"RefreshRequest", RefreshRequest{RefreshToken: "r"}, []string{"refresh_token"}},
+		{"TokenPair", NewTokenPair("a", "r", testTime), []string{"access_token", "refresh_token", "token_type", "expires_at"}},
 	}
 
 	for _, tt := range tests {

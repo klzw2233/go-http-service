@@ -49,6 +49,8 @@ type userRegistrar interface {
 // authenticator is the slice of the auth service the handlers use.
 type authenticator interface {
 	Login(ctx context.Context, username, password string) (*service.LoginResult, error)
+	Refresh(ctx context.Context, refreshToken string) (*service.LoginResult, error)
+	Logout(ctx context.Context, refreshToken string) error
 	UserByID(ctx context.Context, id int64) (*model.User, error)
 }
 
