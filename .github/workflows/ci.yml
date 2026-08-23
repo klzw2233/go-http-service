@@ -115,6 +115,12 @@ jobs:
   docker:
     name: 镜像构建与 compose 冒烟测试
     runs-on: ubuntu-latest
+    # JWT_SECRET 在 job 顶层定义，让所有 step（含 if: always() 的清理步骤）
+    # 都能拿到。CI 用一个固定值即可——这里不签发真实 token，只验证链路；
+    # 环境变量在 step 间不持久，step 级 export 会让 `compose down` 因
+    # `:?` 校验失败而报错。
+    env:
+      JWT_SECRET: ci-test-secret-do-not-use-in-production-0123456789
     steps:
       - name: 检出代码
         uses: actions/checkout@v7
@@ -140,7 +146,6 @@ jobs:
         # compose 的 app.image: 已指向 go-http-service:dev，即上一步构建好的
         # 镜像，compose 直接复用，不重新 build。
         run: |
-          export JWT_SECRET="$(openssl rand -base64 48)"
           docker compose up -d --wait
           # --wait 等依赖的 healthcheck 通过，但 app 自身没有 healthcheck，
           # 所以再轮询 /api/ready 直到它报告数据库就绪。
