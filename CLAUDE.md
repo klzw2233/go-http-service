@@ -13,7 +13,7 @@
 | 操作系统 | Ubuntu 虚拟机（Linux 6.8.0） |
 | Shell | bash |
 | 项目根目录 | `~/workspace/go-http-service` |
-| Go 版本 | go1.26.5 |
+| Go 版本 | go1.26.6 |
 | 编辑方式 | 常从 Win10 通过 VS Code Remote SSH 连入 |
 
 这是标准 Linux 环境，**直接使用 Linux 命令即可**，不需要考虑 Windows 路径或

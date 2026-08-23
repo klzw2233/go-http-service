@@ -183,7 +183,7 @@ curl http://localhost:8080/api/info
 {
   "name": "go-http-service",
   "version": "0.2.0",
-  "go_version": "go1.26.5",
+  "go_version": "go1.26.6",
   "timestamp": "..."
 }
 ```
