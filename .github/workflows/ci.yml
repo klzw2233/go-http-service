@@ -107,3 +107,68 @@ jobs:
             echo "go.mod 或 go.sum 未整理，请在本地运行 go mod tidy 后提交"
             exit 1
           fi
+
+  # 构建镜像并用 compose 起一套 app+db，跑冒烟测试。与 check 并行，
+  # 自己起 compose（不依赖 check 的 postgres service 容器），验证的是
+  # 容器化这条链路本身：Dockerfile 能过、compose 编排正确、ldflags 注入的
+  # version 真的到达了运行时、容器间用服务名连数据库能通。
+  docker:
+    name: 镜像构建与 compose 冒烟测试
+    runs-on: ubuntu-latest
+    # JWT_SECRET 在 job 顶层定义，让所有 step（含 if: always() 的清理步骤）
+    # 都能拿到。CI 用一个固定值即可——这里不签发真实 token，只验证链路；
+    # 环境变量在 step 间不持久，step 级 export 会让 `compose down` 因
+    # `:?` 校验失败而报错。
+    env:
+      JWT_SECRET: ci-test-secret-do-not-use-in-production-0123456789
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v7
+
+      - name: 设置 Docker Buildx
+        # v4 migrated to the Node 24 runtime; v3 still uses Node 20 and
+        # triggers GitHub's Node 20 deprecation warning on every run.
+        uses: docker/setup-buildx-action@v4
+
+      - name: 构建镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # load: true 把构建好的镜像加载进本地 docker，不推送
+          # （未配 registry）。
+          load: true
+          # tag 与 docker-compose.yml 里 app.image: 一致，这样 compose
+          # 复用这个已构建的镜像，而不是重新 build 一个 VERSION=dev 的。
+          tags: go-http-service:dev
+          # 注入 version，便于后面断言 /api/info 返回的 version 含这个标记。
+          build-args: |
+            VERSION=ci-${{ github.sha }}
+
+      - name: 启动 compose 并等待就绪
+        # compose 的 app.image: 已指向 go-http-service:dev，即上一步构建好的
+        # 镜像，compose 直接复用，不重新 build。
+        run: |
+          docker compose up -d --wait
+          # --wait 等依赖的 healthcheck 通过，但 app 自身没有 healthcheck，
+          # 所以再轮询 /api/ready 直到它报告数据库就绪。
+          for i in $(seq 1 30); do
+            if curl -fs http://localhost:8080/api/ready | grep -q '"status":"ready"'; then
+              break
+            fi
+            sleep 1
+          done
+          curl -fs http://localhost:8080/api/ready | grep -q '"name":"database"' \
+            || { echo "app 未连上数据库"; docker compose logs app; exit 1; }
+
+      - name: 冒烟测试
+        run: |
+          # 存活探针
+          curl -fs http://localhost:8080/api/health | grep -q '"status":"ok"'
+          # version 注入生效：应是上面 build-arg 传的 ci-<sha>
+          curl -fs http://localhost:8080/api/info | grep -q "ci-" \
+            || { echo "version 注入未生效"; exit 1; }
+
+      - name: 清理
+        if: always()
+        # 无论成败都停掉并删除卷，不残留资源影响下一次运行
+        run: docker compose down -v

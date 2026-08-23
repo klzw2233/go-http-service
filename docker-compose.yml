@@ -1,0 +1,65 @@
+# App + PostgreSQL, one command to bring up the full stack.
+#
+# Usage:
+#   export JWT_SECRET="$(openssl rand -base64 48)"
+#   docker compose up -d --wait     # start and wait for healthchecks
+#   curl http://localhost:8080/api/health
+#   docker compose down -v           # stop and drop the volume
+#
+# The compose spec dropped the top-level `version:` field; modern docker
+# compose no longer reads it, so it is omitted.
+
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: devsecret
+      POSTGRES_DB: go_http_service
+    # Map to 127.0.0.1:5433 to mirror the standalone dev-database convention
+    # in CLAUDE.md, so host-side tooling (psql, go test with TEST_DATABASE_URL)
+    # keeps working whether the DB is compose-managed or a loose container.
+    # Binding to loopback means the port is never exposed to other hosts.
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d go_http_service"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  app:
+    # `image:` + `build:` together: compose uses the image if it already
+    # exists locally, and only builds (tagging it with this `image:` name)
+    # when it does not. So `docker compose up` Just Works on a fresh
+    # checkout, while CI can pre-build the image with the version it wants
+    # and compose will reuse it instead of rebuilding.
+    image: go-http-service:dev
+    build:
+      context: .
+      args:
+        VERSION: dev
+    ports:
+      - "8080:8080"
+    environment:
+      # The host is the compose service name `db`, not 127.0.0.1: containers
+      # reach each other over the compose network, where 127.0.0.1 would mean
+      # "this app container" and never reach the database.
+      DATABASE_URL: postgres://app:devsecret@db:5432/go_http_service?sslmode=disable
+      # The signing key must not be committed, so it comes from the host
+      # environment. The `:?` form makes `compose up` fail loudly when it is
+      # unset, rather than starting the service with an empty secret (which
+      # config.Load would reject anyway, but the error here is clearer).
+      JWT_SECRET: "${JWT_SECRET:?JWT_SECRET must be set; generate one with: openssl rand -base64 48}"
+    # Start the app only once the database reports healthy, so the app's first
+    # connection attempt is not racing the database's startup.
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:

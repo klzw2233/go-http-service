@@ -2,7 +2,7 @@
 
 > 文件位置：`go-http-service/CLAUDE.md`
 > 用途：告知 Claude Code 本项目的运行环境、约定与注意事项
-> 最后更新：2026-08-23（步骤 D：CORS fail-closed 与安全响应头中间件）
+> 最后更新：2026-08-23（步骤 E：Docker 容器化，多阶段 distroless 镜像 + compose 编排）
 
 ---
 
@@ -34,6 +34,13 @@ PORT=9000 DATABASE_URL="..." JWT_SECRET="..." go run cmd/server/main.go
 
 # 构建
 go build -o server ./cmd/server
+
+# Docker Compose 一键起 app + 数据库（镜像多阶段构建，distroless 终态）
+export JWT_SECRET="$(openssl rand -base64 48)"
+docker compose up -d --wait          # 起服务并等 db healthcheck 过
+docker compose down -v               # 停并删数据卷（去掉 -v 保留数据）
+# 单独构建镜像不走 compose：
+docker build --build-arg VERSION=dev -t go-http-service:dev .
 
 # 提交前的完整检查（与 CI 的检查项一致）
 gofmt -l cmd internal      # 应无输出
@@ -302,6 +309,9 @@ internal/handler/           HTTP 层
   middleware.go             请求体上限、单请求超时
 internal/model/             响应模型与错误码
 notes/                      中文学习笔记
+Dockerfile                  多阶段构建：golang:1.26 编译 → distroless static 运行
+docker-compose.yml          app + postgres 一键编排
+.dockerignore               构建上下文裁剪
 ```
 
 ### 中间件顺序（改动前先读这段）
@@ -350,7 +360,7 @@ CORS 默认 fail-closed：`CORS_ALLOWED_ORIGINS` 留空时不回任何 `Access-C
 4. ~~接 PostgreSQL 步骤 B：迁移机制 + `users` 表 + 注册接口~~ 已完成
 5. ~~接 PostgreSQL 步骤 C：登录 + JWT + refresh 轮转 + 限流~~ 已完成
 6. ~~补充中间件：CORS、安全响应头~~ 已完成
-7. 使用 Docker 容器化部署
+7. ~~使用 Docker 容器化部署~~ 已完成
 8. 尝试 Kubernetes 部署
 
 ### 步骤 C 已落地的规矩（后续直接沿用）
@@ -374,6 +384,24 @@ CORS 默认 fail-closed：`CORS_ALLOWED_ORIGINS` 留空时不回任何 `Access-C
 - `X-XSS-Protection` 设为 `0`（关闭旧审计器），不是 `1; mode=block`——
   现代浏览器已移除该机制，旧版本反而是攻击面
 - API 响应一律 `Cache-Control: no-store`，因为常带凭据
+
+### 步骤 E 已落地的规矩（后续直接沿用）
+
+- **运行镜像用 distroless static nonroot**：无 shell、非 root（uid 65532）、
+  ~10MB。`CGO_ENABLED=0` 出静态二进制才能跑在 distroless/static 上——pgx v5
+  是纯 Go 驱动，天然满足。不要换成 alpine「图方便能 exec 进去」，
+  镜像有 shell = 攻击面更大
+- distroless **无 shell**，所以 `ENTRYPOINT` 必须是 exec 数组形式 `["/server"]`，
+  不能用 shell 形式
+- **version 在 build 阶段注入**：`-ldflags "-X go-http-service/internal/model.Version=${VERSION}"`。
+  distroless 运行阶段没有 git，所以 version 必须在 golang:1.26 那层算出来，
+  通过 build-arg 传入
+- **compose 里 `DATABASE_URL` 的 host 是服务名 `db`**，不是 `127.0.0.1`——
+  容器间走 compose 网络，`127.0.0.1` 指容器自己
+- **`JWT_SECRET` 不进 compose 文件**，用 `${JWT_SECRET:?...}` 从宿主机读，
+  `:?` 让未设置时直接报错而非静默空值
+- `app.image:` 和 `build:` 同时写：compose 优先用已存在的镜像，不存在才 build。
+  这样本地 `compose up` 自动构建，CI 可 pre-build 后复用、不重建
 
 ### 已经立好的规矩（后续直接沿用）
 
