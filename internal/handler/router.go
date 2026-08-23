@@ -33,8 +33,16 @@ func SetupRouter(api *API) *gin.Engine {
 	r.Use(gin.CustomRecovery(api.handlePanic))
 	// 4. Deadline for handler work, inherited by any query downstream.
 	r.Use(timeout(api.cfg.RequestTimeout))
-	// 5. Body cap last: it only concerns handlers that read a body.
+	// 5. Body cap: it only concerns handlers that read a body.
 	r.Use(limitBodySize(api.cfg.MaxBodyBytes))
+	// 6. Security headers on every response, including 404s and panics, so
+	//    they are written before any handler or error path can short-circuit.
+	r.Use(SecurityHeaders())
+	// 7. CORS last among the global middleware. It is fail-closed: with no
+	//    allowed origins configured it adds no Access-Control-* header, and
+	//    a browser denies every cross-origin request. Same-origin and
+	//    non-browser callers are unaffected.
+	r.Use(CORS(api.cfg.CORSAllowedOrigins))
 
 	// gin trusts every proxy by default, so c.ClientIP() would believe any
 	// X-Forwarded-For it is sent. An empty list means trust nobody.
