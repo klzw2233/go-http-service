@@ -1,0 +1,30 @@
+# Local build artifacts — never needed inside the image.
+server
+*.exe
+*.test
+*.out
+.go-cache/
+
+# Vendoring is not used; a stray vendor/ would shadow go mod download.
+vendor/
+
+# Git history and CI config have no place in the build context.
+.git
+.gitignore
+.github/
+
+# IDE and editor state.
+.vscode/
+.idea/
+**/.DS_Store
+
+# Claude Code working files.
+.claude/
+
+# Learning notes are not part of the runtime image.
+notes/
+
+# Docker's own files don't belong in the image either.
+Dockerfile
+.dockerignore
+docker-compose.yml
