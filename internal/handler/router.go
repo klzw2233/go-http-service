@@ -14,17 +14,34 @@ import (
 const apiBasePath = "/api"
 
 // SetupRouter configures and returns the application router.
+//
+// The middleware order below is deliberate and is the part most likely to
+// be broken by a careless edit; each step says why it sits where it does.
 func SetupRouter(api *API) *gin.Engine {
 	configureValidator()
 
 	r := gin.New()
 
+	// 1. Correlation ID first, so everything logged afterwards carries it.
 	r.Use(requestID())
+	// 2. Access log next: it measures the whole request and must observe
+	//    the final status. It has to sit OUTSIDE Recovery — see the
+	//    comment on requestLogger for why the usual order is wrong here.
 	r.Use(requestLogger(api.log))
+	// 3. Recovery inside the logger, so a panic is turned into a 500
+	//    before the access log reads the status.
 	r.Use(gin.CustomRecovery(api.handlePanic))
+	// 4. Deadline for handler work, inherited by any query downstream.
 	r.Use(timeout(api.cfg.RequestTimeout))
+	// 5. Body cap: it only concerns handlers that read a body.
 	r.Use(limitBodySize(api.cfg.MaxBodyBytes))
+	// 6. Security headers on every response, including 404s and panics, so
+	//    they are written before any handler or error path can short-circuit.
 	r.Use(SecurityHeaders())
+	// 7. CORS last among the global middleware. It is fail-closed: with no
+	//    allowed origins configured it adds no Access-Control-* header, and
+	//    a browser denies every cross-origin request. Same-origin and
+	//    non-browser callers are unaffected.
 	r.Use(CORS(api.cfg.CORSAllowedOrigins))
 
 	if err := r.SetTrustedProxies(api.cfg.TrustedProxies); err != nil {
