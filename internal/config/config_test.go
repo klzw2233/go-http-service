@@ -25,6 +25,7 @@ var envVars = []string{
 	"RATE_LIMIT_RPS", "RATE_LIMIT_BURST",
 	"LOGIN_RATE_LIMIT_RPM", "LOGIN_RATE_LIMIT_BURST",
 	"JWT_SECRET", "ACCESS_TOKEN_TTL", "REFRESH_TOKEN_TTL",
+	"AUTHOR_USERNAME",
 }
 
 // testDSN is a syntactically valid connection string. It is seeded by
@@ -36,6 +37,10 @@ const testDSN = "postgres://app:pw@db:5432/svc"
 // testJWTSecret is exactly at the minimum length, so the same value
 // exercises both the length rule and the happy path.
 const testJWTSecret = "0123456789abcdef0123456789abcdef"
+
+// testAuthorUsername names the Author. Seeded by setEnv because
+// AUTHOR_USERNAME is required.
+const testAuthorUsername = "jimmy"
 
 // setEnv clears every known variable, seeds the required ones, then
 // applies the given overrides. t.Setenv restores the previous values,
@@ -51,6 +56,7 @@ func setEnv(t *testing.T, overrides map[string]string) {
 	}
 	t.Setenv("DATABASE_URL", testDSN)
 	t.Setenv("JWT_SECRET", testJWTSecret)
+	t.Setenv("AUTHOR_USERNAME", testAuthorUsername)
 
 	for k, v := range overrides {
 		t.Setenv(k, v)
@@ -85,6 +91,7 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, testJWTSecret, cfg.JWTSecret, "JWT_SECRET 是必需项，由 setEnv 注入")
 	assert.Equal(t, DefaultAccessTokenTTL, cfg.AccessTokenTTL)
 	assert.Equal(t, DefaultRefreshTokenTTL, cfg.RefreshTokenTTL)
+	assert.Equal(t, testAuthorUsername, cfg.AuthorUsername)
 }
 
 func TestLoad_Overrides(t *testing.T) {
@@ -106,6 +113,7 @@ func TestLoad_Overrides(t *testing.T) {
 		"DB_CONNECT_TIMEOUT":   "3s",
 		"ACCESS_TOKEN_TTL":     "30m",
 		"REFRESH_TOKEN_TTL":    "48h",
+		"AUTHOR_USERNAME":      "Alice",
 	})
 
 	cfg, err := Load()
@@ -131,6 +139,7 @@ func TestLoad_Overrides(t *testing.T) {
 	assert.Equal(t, 3*time.Second, cfg.DBConnectTimeout)
 	assert.Equal(t, 30*time.Minute, cfg.AccessTokenTTL)
 	assert.Equal(t, 48*time.Hour, cfg.RefreshTokenTTL)
+	assert.Equal(t, "Alice", cfg.AuthorUsername)
 }
 
 // TestLoad_EmptyMeansUnset pins that an explicitly empty variable falls
@@ -271,6 +280,21 @@ func TestLoad_InvalidValues(t *testing.T) {
 			name:    "JWT 密钥过短",
 			env:     map[string]string{"JWT_SECRET": strings.Repeat("a", MinJWTSecretLen-1)},
 			wantErr: "JWT_SECRET must be at least 32 bytes",
+		},
+		{
+			name:    "缺少 Author 用户名",
+			env:     map[string]string{"AUTHOR_USERNAME": ""},
+			wantErr: "AUTHOR_USERNAME is required",
+		},
+		{
+			name:    "Author 用户名过短",
+			env:     map[string]string{"AUTHOR_USERNAME": "ab"},
+			wantErr: "AUTHOR_USERNAME must be 3-32 alphanumeric characters",
+		},
+		{
+			name:    "Author 用户名含非字母数字",
+			env:     map[string]string{"AUTHOR_USERNAME": "jim my"},
+			wantErr: "AUTHOR_USERNAME must be 3-32 alphanumeric characters",
 		},
 	}
 

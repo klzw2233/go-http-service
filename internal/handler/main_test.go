@@ -59,6 +59,7 @@ func testConfig() *config.Config {
 		RateLimitBurst:      1000,
 		LoginRateLimitRPM:   1000,
 		LoginRateLimitBurst: 1000,
+		AuthorUsername:      "jimmy",
 		LogLevel:            slog.LevelDebug,
 		LogFormat:           config.FormatJSON,
 	}

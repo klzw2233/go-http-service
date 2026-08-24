@@ -11,6 +11,11 @@ import (
 )
 
 // CreateUser handles POST /api/users and registers an account.
+//
+// Public registration is closed. Callers without a Bearer token get 403,
+// not 401: this is a permission decision, not a prompt to sign in.
+// A signed-in Author may still create a User (operator convenience after
+// the first account exists). Anyone else is 403.
 func (a *API) CreateUser(c *gin.Context) {
 	var req model.CreateUserRequest
 	if err := c.ShouldBindJSON(&req); err != nil {

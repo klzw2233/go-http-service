@@ -2,7 +2,7 @@
 
 > 文件位置：`go-http-service/CLAUDE.md`
 > 用途：告知 Claude Code 本项目的运行环境、约定与注意事项
-> 最后更新：2026-08-23（步骤 E：Docker 容器化，多阶段 distroless 镜像 + compose 编排）
+> 最后更新：2026-08-25（#2：AUTHOR_USERNAME 必需，公开注册关闭）
 
 ---
 
@@ -24,19 +24,21 @@ PowerShell 兼容性。旧版本本文件描述的 `E:\Program Files\...` 路径
 ## 二、常用命令
 
 ```bash
-# 运行服务（DATABASE_URL 与 JWT_SECRET 都是必需项）
+# 运行服务（DATABASE_URL、JWT_SECRET、AUTHOR_USERNAME 都是必需项）
 DATABASE_URL="postgres://app:devsecret@127.0.0.1:5433/go_http_service?sslmode=disable" \
 JWT_SECRET="$(openssl rand -base64 48)" \
+AUTHOR_USERNAME=jimmy \
   go run cmd/server/main.go
 
 # 换端口
-PORT=9000 DATABASE_URL="..." JWT_SECRET="..." go run cmd/server/main.go
+PORT=9000 DATABASE_URL="..." JWT_SECRET="..." AUTHOR_USERNAME=jimmy go run cmd/server/main.go
 
 # 构建
 go build -o server ./cmd/server
 
 # Docker Compose 一键起 app + 数据库（镜像多阶段构建，distroless 终态）
 export JWT_SECRET="$(openssl rand -base64 48)"
+export AUTHOR_USERNAME=jimmy
 docker compose up -d --wait          # 起服务并等 db healthcheck 过
 docker compose down -v               # 停并删数据卷（去掉 -v 保留数据）
 # 单独构建镜像不走 compose：
@@ -78,6 +80,7 @@ docker stop  go-http-service-db
 # 带数据库运行
 DATABASE_URL="postgres://app:devsecret@127.0.0.1:5433/go_http_service?sslmode=disable" \
 JWT_SECRET="$(openssl rand -base64 48)" \
+AUTHOR_USERNAME=jimmy \
   go run cmd/server/main.go
 
 # 跑需要数据库的测试（不设置这个变量则相关测试自动跳过）
@@ -265,6 +268,7 @@ refresh token 和密码都是凭据，都不能明文入库。但 refresh token 
 | `REQUEST_TIMEOUT` | `8s` | 单请求处理超时，必须小于 `WRITE_TIMEOUT` |
 | `DATABASE_URL` | **必需** | PostgreSQL 连接串 |
 | `JWT_SECRET` | **必需**，≥32 字节 | HS256 密钥，必须在 `LogValue()` 脱敏 |
+| `AUTHOR_USERNAME` | **必需**，3–32 字母数字 | 可写 Posts 的 User 名；不是密钥，`LogValue()` 原样写出 |
 | `ACCESS_TOKEN_TTL` / `REFRESH_TOKEN_TTL` | `15m` / `720h` | token 有效期 |
 | `LOG_LEVEL` / `LOG_FORMAT` | `info` / `json` | 日志级别与格式 |
 
@@ -299,6 +303,8 @@ internal/handler/           HTTP 层
   health.go                 /api/health  liveness，不查依赖
   ready.go                  /api/ready   readiness，并发跑依赖检查
   auth.go                   登录 / 刷新 / 登出 / me、认证中间件
+  author.go                 关闭匿名注册、Author 校验（EqualFold）
+  user.go                   POST /api/users，仅 Author
   ratelimit.go              按 IP 令牌桶 + 空闲淘汰
   cors.go                   fail-closed CORS（按 origin 精确匹配）
   headers.go                安全响应头（每个响应都带）
@@ -361,7 +367,8 @@ CORS 默认 fail-closed：`CORS_ALLOWED_ORIGINS` 留空时不回任何 `Access-C
 5. ~~接 PostgreSQL 步骤 C：登录 + JWT + refresh 轮转 + 限流~~ 已完成
 6. ~~补充中间件：CORS、安全响应头~~ 已完成
 7. ~~使用 Docker 容器化部署~~ 已完成
-8. 尝试 Kubernetes 部署
+8. ~~尝试 Kubernetes 部署~~ 暂缓；当前方向是个人博客
+9. 博客：#2 命名 Author 并关闭公开注册（进行中）→ #3 Draft JSON → #4 Publish/HTML → #5 Author 区浏览器
 
 ### 步骤 C 已落地的规矩（后续直接沿用）
 
@@ -399,7 +406,7 @@ CORS 默认 fail-closed：`CORS_ALLOWED_ORIGINS` 留空时不回任何 `Access-C
 - **compose 里 `DATABASE_URL` 的 host 是服务名 `db`**，不是 `127.0.0.1`——
   容器间走 compose 网络，`127.0.0.1` 指容器自己
 - **`JWT_SECRET` 不进 compose 文件**，用 `${JWT_SECRET:?...}` 从宿主机读，
-  `:?` 让未设置时直接报错而非静默空值
+  `:?` 让未设置时直接报错而非静默空值。`AUTHOR_USERNAME` 同理：不是密钥，但仍是必需项
 - `app.image:` 和 `build:` 同时写：compose 优先用已存在的镜像，不存在才 build。
   这样本地 `compose up` 自动构建，CI 可 pre-build 后复用、不重建
 
@@ -420,3 +427,19 @@ CORS 默认 fail-closed：`CORS_ALLOWED_ORIGINS` 留空时不回任何 `Access-C
 `DATABASE_URL` 现在是必需项，所以 `cmd/server` 的端到端测试整体需要
 `TEST_DATABASE_URL`，未设置就 skip。CI 里配了 postgres service 容器，
 并额外跑一遍不带数据库的测试，确保「本地无库也能跑单元测试」不退化。
+
+---
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs live in this repo's GitHub Issues (`gh`). See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default five roles, label string equals the role name. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: root `CONTEXT.md` and `docs/adr/`. See `docs/agents/domain.md`.
