@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{.SiteName}}</title>
+</head>
+<body>
+<h1>{{.SiteName}}</h1>
+{{if .Posts}}
+<ul>
+{{range .Posts}}
+<li><a href="/posts/{{.Slug}}">{{.Title}}</a> <time datetime="{{.PublishedAt.UTC.Format "2006-01-02T15:04:05Z"}}">{{.PublishedAt.UTC.Format "2006-01-02"}}</time></li>
+{{end}}
+</ul>
+{{else}}
+<p>No posts yet.</p>
+{{end}}
+</body>
+</html>

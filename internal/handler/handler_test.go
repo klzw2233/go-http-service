@@ -289,9 +289,9 @@ func TestRouting(t *testing.T) {
 			wantCode:   model.ErrCodeNotFound,
 		},
 		{
-			name:       "根路径未注册",
+			name:       "unknown public path is JSON 404",
 			method:     http.MethodGet,
-			path:       "/",
+			path:       "/no-such-public-path",
 			wantStatus: http.StatusNotFound,
 			wantCode:   model.ErrCodeNotFound,
 		},

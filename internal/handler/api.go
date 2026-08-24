@@ -72,6 +72,10 @@ type postService interface {
 	GetPost(ctx context.Context, slug string) (*model.Post, error)
 	ListPosts(ctx context.Context) ([]model.Post, error)
 	UpdatePost(ctx context.Context, in service.UpdatePostInput) (*model.Post, error)
+	PublishPost(ctx context.Context, slug string) (*model.Post, error)
+	UnpublishPost(ctx context.Context, slug string) (*model.Post, error)
+	ListPublishedPosts(ctx context.Context) ([]model.Post, error)
+	GetPublishedPost(ctx context.Context, slug string) (*model.Post, error)
 }
 
 // readyCheck is one dependency probed by the readiness endpoint.

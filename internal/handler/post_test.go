@@ -18,10 +18,14 @@ import (
 // method returns a canned result or error; tests inspect the captured
 // inputs to assert the handler passed the right values through.
 type stubPostService struct {
-	createPost func(ctx context.Context, in service.CreatePostInput) (*model.Post, error)
-	getPost    func(ctx context.Context, slug string) (*model.Post, error)
-	listPosts  func(ctx context.Context) ([]model.Post, error)
-	updatePost func(ctx context.Context, in service.UpdatePostInput) (*model.Post, error)
+	createPost         func(ctx context.Context, in service.CreatePostInput) (*model.Post, error)
+	getPost            func(ctx context.Context, slug string) (*model.Post, error)
+	listPosts          func(ctx context.Context) ([]model.Post, error)
+	updatePost         func(ctx context.Context, in service.UpdatePostInput) (*model.Post, error)
+	publishPost        func(ctx context.Context, slug string) (*model.Post, error)
+	unpublishPost      func(ctx context.Context, slug string) (*model.Post, error)
+	listPublishedPosts func(ctx context.Context) ([]model.Post, error)
+	getPublishedPost   func(ctx context.Context, slug string) (*model.Post, error)
 
 	createIn  service.CreatePostInput
 	createCtx context.Context
@@ -69,6 +73,38 @@ func (s *stubPostService) UpdatePost(ctx context.Context, in service.UpdatePostI
 	}
 	return &model.Post{ID: 1, Slug: in.SlugFromPath, Title: "T", Body: "B", Published: false,
 		CreatedAt: fixedTime, UpdatedAt: fixedTime}, nil
+}
+
+func (s *stubPostService) PublishPost(ctx context.Context, slug string) (*model.Post, error) {
+	if s.publishPost != nil {
+		return s.publishPost(ctx, slug)
+	}
+	now := fixedTime
+	return &model.Post{ID: 1, Slug: slug, Title: "T", Body: "B", Published: true,
+		PublishedAt: &now, CreatedAt: fixedTime, UpdatedAt: fixedTime}, nil
+}
+
+func (s *stubPostService) UnpublishPost(ctx context.Context, slug string) (*model.Post, error) {
+	if s.unpublishPost != nil {
+		return s.unpublishPost(ctx, slug)
+	}
+	now := fixedTime
+	return &model.Post{ID: 1, Slug: slug, Title: "T", Body: "B", Published: false,
+		PublishedAt: &now, CreatedAt: fixedTime, UpdatedAt: fixedTime}, nil
+}
+
+func (s *stubPostService) ListPublishedPosts(ctx context.Context) ([]model.Post, error) {
+	if s.listPublishedPosts != nil {
+		return s.listPublishedPosts(ctx)
+	}
+	return nil, nil
+}
+
+func (s *stubPostService) GetPublishedPost(ctx context.Context, slug string) (*model.Post, error) {
+	if s.getPublishedPost != nil {
+		return s.getPublishedPost(ctx, slug)
+	}
+	return nil, service.ErrPostNotFound
 }
 
 // routerWithPosts wires the Author stubs plus a Post service, the

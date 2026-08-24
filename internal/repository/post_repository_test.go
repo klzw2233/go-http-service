@@ -263,3 +263,81 @@ func TestPostSlugUniqueCoversDrafts(t *testing.T) {
 	// keep the error message stable for the concurrent test's string match
 	_ = strings.TrimSpace(err.Error())
 }
+
+func TestPostPublish_SetsPublishedAtOnce(t *testing.T) {
+	t.Parallel()
+
+	repo := NewPostRepository(testPool(t))
+	p := newPost(t, uniqueName("pub"))
+	require.NoError(t, repo.Create(t.Context(), p))
+
+	first := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	got, err := repo.Publish(t.Context(), p.Slug, first)
+	require.NoError(t, err)
+	require.True(t, got.Published)
+	require.NotNil(t, got.PublishedAt)
+	assert.True(t, got.PublishedAt.Equal(first))
+
+	later := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	again, err := repo.Publish(t.Context(), p.Slug, later)
+	require.NoError(t, err)
+	require.NotNil(t, again.PublishedAt)
+	assert.True(t, again.PublishedAt.Equal(first), "再次 Publish 不得改写首次 published_at")
+}
+
+func TestPostUnpublish_KeepsPublishedAt(t *testing.T) {
+	t.Parallel()
+
+	repo := NewPostRepository(testPool(t))
+	p := newPost(t, uniqueName("unpub"))
+	require.NoError(t, repo.Create(t.Context(), p))
+
+	when := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	_, err := repo.Publish(t.Context(), p.Slug, when)
+	require.NoError(t, err)
+
+	got, err := repo.Unpublish(t.Context(), p.Slug)
+	require.NoError(t, err)
+	assert.False(t, got.Published)
+	require.NotNil(t, got.PublishedAt)
+	assert.True(t, got.PublishedAt.Equal(when))
+}
+
+func TestPostListPublished_OmitsDraftsAndOrdersByPublishedAt(t *testing.T) {
+	t.Parallel()
+
+	repo := NewPostRepository(testPool(t))
+	older := newPost(t, uniqueName("pub-old"))
+	newer := newPost(t, uniqueName("pub-new"))
+	draft := newPost(t, uniqueName("pub-draft"))
+	require.NoError(t, repo.Create(t.Context(), older))
+	require.NoError(t, repo.Create(t.Context(), newer))
+	require.NoError(t, repo.Create(t.Context(), draft))
+
+	oldTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	newTime := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	_, err := repo.Publish(t.Context(), older.Slug, oldTime)
+	require.NoError(t, err)
+	_, err = repo.Publish(t.Context(), newer.Slug, newTime)
+	require.NoError(t, err)
+
+	got, err := repo.ListPublished(t.Context())
+	require.NoError(t, err)
+
+	var idxOld, idxNew, idxDraft = -1, -1, -1
+	for i, row := range got {
+		if row.ID == older.ID {
+			idxOld = i
+		}
+		if row.ID == newer.ID {
+			idxNew = i
+		}
+		if row.ID == draft.ID {
+			idxDraft = i
+		}
+	}
+	assert.Equal(t, -1, idxDraft, "Draft 不得出现在公开列表")
+	require.NotEqual(t, -1, idxOld)
+	require.NotEqual(t, -1, idxNew)
+	assert.Less(t, idxNew, idxOld, "更新的 published_at 应排在前面")
+}
