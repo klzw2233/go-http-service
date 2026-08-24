@@ -38,6 +38,11 @@ type API struct {
 	// middleware only needs verification, not the database.
 	tokens tokenVerifier
 
+	// posts implements Post operations behind the Author check. Declared
+	// as an interface so handler tests drive it without a database, the
+	// same way users/auth are stubbed.
+	posts postService
+
 	readyChecks []readyCheck
 }
 
@@ -57,6 +62,16 @@ type authenticator interface {
 // tokenVerifier checks an access token and reports whose it is.
 type tokenVerifier interface {
 	ParseAccess(token string) (int64, error)
+}
+
+// postService is the slice of the Post service the handlers use. Each
+// method mirrors a service method so the handler never imports service
+// beyond its input/output types, keeping the dependency direction one-way.
+type postService interface {
+	CreatePost(ctx context.Context, in service.CreatePostInput) (*model.Post, error)
+	GetPost(ctx context.Context, slug string) (*model.Post, error)
+	ListPosts(ctx context.Context) ([]model.Post, error)
+	UpdatePost(ctx context.Context, in service.UpdatePostInput) (*model.Post, error)
 }
 
 // readyCheck is one dependency probed by the readiness endpoint.
@@ -100,6 +115,11 @@ func WithAuthService(auth authenticator) Option {
 // WithTokenVerifier supplies access token verification for requireAuth.
 func WithTokenVerifier(tokens tokenVerifier) Option {
 	return func(a *API) { a.tokens = tokens }
+}
+
+// WithPostService supplies the Post operations behind the Author routes.
+func WithPostService(posts postService) Option {
+	return func(a *API) { a.posts = posts }
 }
 
 // WithReadyCheck registers a dependency probe for GET /api/ready.

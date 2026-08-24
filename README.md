@@ -32,6 +32,7 @@
 | 安全响应头 | 每个响应都带 `nosniff`、`DENY`、`HSTS`、`Cache-Control: no-store` 等 |
 | CORS | fail-closed：未配置时拒绝所有跨域，配置后按 origin 精确匹配 |
 | 关闭公开注册 | 未认证 `POST /api/users` 返回 403；仅 `AUTHOR_USERNAME` 指名的 Author 可建账号 |
+| Draft JSON | Author 通过 `/api/posts` 增/查/列/改 Draft；slug 创建时选定、不可改、含 Draft 全局唯一 |
 | 登录与 JWT | `POST /api/auth/login`，HS256，失败响应完全一致 |
 | Refresh 轮转 | 每次刷新作废旧 token；重放则撤销该用户全部会话 |
 | 按 IP 限流 | 全局宽松 + 登录严格，探针豁免；内存实现，每副本独立 |
@@ -61,14 +62,17 @@ go-http-service/
 │   │   ├── migrate.go           # 手写迁移器（embed + advisory lock）
 │   │   ├── migrations/          # SQL 迁移文件，按文件名顺序执行
 │   │   │   ├── 0001_create_users.sql
-│   │   │   └── 0002_create_refresh_tokens.sql
+│   │   │   ├── 0002_create_refresh_tokens.sql
+│   │   │   └── 0003_create_posts.sql
 │   │   └── db_test.go
 │   ├── repository/
-│   │   ├── user_repository.go   # users 表读写、唯一键冲突翻译
-│   │   └── refresh_token_repository.go  # refresh 哈希存取、轮转、重放
+│   │   ├── user_repository.go        # users 表读写、唯一键冲突翻译
+│   │   ├── refresh_token_repository.go  # refresh 哈希存取、轮转、重放
+│   │   └── post_repository.go        # posts 表读写、slug 唯一键翻译
 │   ├── service/
 │   │   ├── user_service.go      # 注册业务规则、bcrypt
-│   │   └── auth_service.go      # 登录、刷新、登出、计时拉平
+│   │   ├── auth_service.go      # 登录、刷新、登出、计时拉平
+│   │   └── post_service.go      # Post 增/查/列/改、slug/title/body 校验
 │   ├── handler/
 │   │   ├── api.go               # API 结构体：依赖注入的载体
 │   │   ├── router.go            # 路由注册、中间件顺序、404/405/panic
@@ -78,6 +82,7 @@ go-http-service/
 │   │   ├── echo.go              # /api/echo
 │   │   ├── user.go              # /api/users    建账号（仅 Author）
 │   │   ├── author.go            # 关闭匿名注册、Author 校验
+│   │   ├── post.go              # /api/posts    Draft 增/查/列/改（仅 Author）
 │   │   ├── auth.go              # 登录 / 刷新 / 登出 / me、认证中间件
 │   │   ├── ratelimit.go         # 按 IP 令牌桶 + 空闲淘汰
 │   │   ├── cors.go              # fail-closed CORS（按 origin 精确匹配）
@@ -93,6 +98,7 @@ go-http-service/
 │       ├── echo.go              # EchoRequest, EchoResponse
 │       ├── auth.go              # LoginRequest、TokenPair、RefreshRequest
 │       ├── refresh.go           # 入库的 RefreshToken（无 JSON 标签）
+│       ├── post.go             # Post、PostRequest/Response、长度与 slug 常量
 │       ├── error.go             # ErrorResponse、错误码常量
 │       └── model_test.go
 ├── notes/                       # 中文学习笔记
@@ -585,6 +591,10 @@ Service 把它翻译成自己的同名错误，Handler 只匹配 Service 的错�
 | POST | `/api/auth/refresh` | 用 refresh 换新的一对 |
 | POST | `/api/auth/logout` | 撤销该 refresh token |
 | GET | `/api/auth/me` | 当前用户（需 `Authorization: Bearer`） |
+| POST | `/api/posts` | 创建 Draft（仅 Author）。请求体 `{title, slug, body}`，201 返回 Post |
+| GET | `/api/posts` | 列出全部含 Draft（仅 Author） |
+| GET | `/api/posts/:slug` | 取一个 Post（仅 Author；不存在 404） |
+| PATCH | `/api/posts/:slug` | 改 title 和/或 body（仅 Author）；slug 不可改 |
 
 ### health 与 ready 的区别
 
