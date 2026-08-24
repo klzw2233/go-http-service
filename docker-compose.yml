@@ -2,6 +2,7 @@
 #
 # Usage:
 #   export JWT_SECRET="$(openssl rand -base64 48)"
+#   export AUTHOR_USERNAME=jimmy
 #   docker compose up -d --wait     # start and wait for healthchecks
 #   curl http://localhost:8080/api/health
 #   docker compose down -v           # stop and drop the volume
@@ -54,6 +55,10 @@ services:
       # unset, rather than starting the service with an empty secret (which
       # config.Load would reject anyway, but the error here is clearer).
       JWT_SECRET: "${JWT_SECRET:?JWT_SECRET must be set; generate one with: openssl rand -base64 48}"
+      # Names the User who may write Posts. Not a secret; still required so
+      # the process refuses to start without an Author. The first User is
+      # an operator SQL insert — this value only names who that is.
+      AUTHOR_USERNAME: "${AUTHOR_USERNAME:?AUTHOR_USERNAME must be set; it names the User who may write Posts}"
     # Start the app only once the database reports healthy, so the app's first
     # connection attempt is not racing the database's startup.
     depends_on:

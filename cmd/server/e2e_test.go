@@ -21,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // testDSN is the connection string every started server receives. It is
@@ -31,6 +32,11 @@ var testDSN string
 // testJWTSecret signs tokens for the started servers. Exactly at the
 // minimum length, so the same value exercises the length rule.
 const testJWTSecret = "e2e-0123456789abcdef0123456789ab"
+
+// testAuthorUsername names the Author. Seeded on every start because
+// AUTHOR_USERNAME is required. Suites that need a matching User insert
+// one, or override the env to a unique name.
+const testAuthorUsername = "jimmy"
 
 // TestEndToEnd builds the real binary, runs it as a real process, and
 // drives it over a real TCP connection.
@@ -78,6 +84,8 @@ func TestEndToEnd(t *testing.T) {
 			cfg, ok := rec["config"].(map[string]any)
 			require.True(t, ok, "config 应作为分组字段输出: %v", rec["config"])
 			assert.Equal(t, srv.port, cfg["port"])
+			assert.Equal(t, testAuthorUsername, cfg["author_username"],
+				"Author 用户名不是密钥，启动日志应原样写出")
 		})
 
 		t.Run("health 返回 200 与 JSON", func(t *testing.T) {
@@ -282,6 +290,11 @@ func TestEndToEnd(t *testing.T) {
 				env:     map[string]string{"JWT_SECRET": "too-short"},
 				wantMsg: "JWT_SECRET must be at least 32 bytes",
 			},
+			{
+				name:    "缺少 Author 用户名",
+				env:     map[string]string{"AUTHOR_USERNAME": ""},
+				wantMsg: "AUTHOR_USERNAME is required",
+			},
 		}
 
 		for _, tt := range tests {
@@ -398,32 +411,64 @@ func TestEndToEnd(t *testing.T) {
 		})
 	})
 
-	// The first vertical slice: HTTP through service and repository to
-	// SQL and back. Unit tests cover each layer with the next one
-	// stubbed; only this proves they fit together.
-	t.Run("注册接口", func(t *testing.T) {
-		srv := startServer(t, bin, nil)
+	// Public registration is closed. The first User is an operator
+	// insert; only the named Author may POST /api/users afterwards.
+	t.Run("公开注册已关闭", func(t *testing.T) {
+		author := fmt.Sprintf("e2e%d", time.Now().UnixNano())
+		cleanupUsers(t, author)
 
-		username := fmt.Sprintf("e2e%d", time.Now().UnixNano())
-		cleanupUsers(t, username)
+		const password = "correct-horse-battery"
+		srv := startServer(t, bin, map[string]string{
+			"AUTHOR_USERNAME":        author,
+			"LOGIN_RATE_LIMIT_RPM":   "60",
+			"LOGIN_RATE_LIMIT_BURST": "30",
+		})
+		insertUser(t, author, author+"@example.com", password)
 
+		username := author + "u"
 		email := username + "@example.com"
 		body := fmt.Sprintf(
 			`{"username":%q,"email":%q,"password":"correct-horse-battery"}`, username, email)
 
-		var created struct {
-			ID        int64     `json:"id"`
-			Username  string    `json:"username"`
-			Email     string    `json:"email"`
-			CreatedAt time.Time `json:"created_at"`
-		}
-
-		t.Run("注册成功返回 201", func(t *testing.T) {
+		t.Run("未认证注册返回 403", func(t *testing.T) {
 			resp, raw := srv.post(t, "/api/users", body)
 
-			require.Equal(t, http.StatusCreated, resp.StatusCode, "body: %s", raw)
-			require.NoError(t, json.Unmarshal([]byte(raw), &created))
+			require.Equal(t, http.StatusForbidden, resp.StatusCode, "body: %s", raw)
+			assert.Contains(t, raw, `"code":"FORBIDDEN"`)
+			assert.Empty(t, resp.Header.Get("WWW-Authenticate"),
+				"未认证注册是权限拒绝，不是提示去登录")
+		})
 
+		var (
+			token  string
+			raw201 string
+		)
+
+		t.Run("Author 注册成功返回 201", func(t *testing.T) {
+			credentials := fmt.Sprintf(`{"username":%q,"password":%q}`, author, password)
+			resp, raw := srv.post(t, "/api/auth/login", credentials)
+			require.Equal(t, http.StatusOK, resp.StatusCode, "body: %s", raw)
+
+			var pair struct {
+				AccessToken string `json:"access_token"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(raw), &pair))
+			require.NotEmpty(t, pair.AccessToken)
+			token = pair.AccessToken
+
+			resp, raw = srv.postJSON(t, "/api/users", body, map[string]string{
+				"Authorization": "Bearer " + token,
+			})
+			require.Equal(t, http.StatusCreated, resp.StatusCode, "body: %s", raw)
+			raw201 = raw
+
+			var created struct {
+				ID        int64     `json:"id"`
+				Username  string    `json:"username"`
+				Email     string    `json:"email"`
+				CreatedAt time.Time `json:"created_at"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(raw), &created))
 			assert.Positive(t, created.ID, "id 应由数据库生成")
 			assert.Equal(t, username, created.Username)
 			assert.Equal(t, email, created.Email)
@@ -431,17 +476,38 @@ func TestEndToEnd(t *testing.T) {
 		})
 
 		t.Run("响应不含任何密码材料", func(t *testing.T) {
-			_, raw := srv.post(t, "/api/users",
-				fmt.Sprintf(`{"username":"%s2","email":"2%s","password":"correct-horse-battery"}`,
-					username, email))
-
+			require.NotEmpty(t, raw201, "依赖前一个子测试拿到的响应")
 			for _, leak := range []string{"password", "$2a$", "correct-horse-battery"} {
-				assert.NotContains(t, raw, leak, "响应泄露了 %q: %s", leak, raw)
+				assert.NotContains(t, raw201, leak, "响应泄露了 %q: %s", leak, raw201)
 			}
 		})
 
+		t.Run("非 Author 注册返回 403", func(t *testing.T) {
+			other := author + "x"
+			insertUser(t, other, other+"@example.com", password)
+
+			resp, raw := srv.post(t, "/api/auth/login",
+				fmt.Sprintf(`{"username":%q,"password":%q}`, other, password))
+			require.Equal(t, http.StatusOK, resp.StatusCode, "body: %s", raw)
+
+			var pair struct {
+				AccessToken string `json:"access_token"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(raw), &pair))
+
+			resp, raw = srv.postJSON(t, "/api/users",
+				fmt.Sprintf(`{"username":%q,"email":%q,"password":"correct-horse-battery"}`,
+					other+"2", other+"2@example.com"),
+				map[string]string{"Authorization": "Bearer " + pair.AccessToken})
+			require.Equal(t, http.StatusForbidden, resp.StatusCode, "body: %s", raw)
+			assert.Contains(t, raw, `"code":"FORBIDDEN"`)
+		})
+
 		t.Run("重复用户名返回 409", func(t *testing.T) {
-			resp, raw := srv.post(t, "/api/users", body)
+			require.NotEmpty(t, token, "依赖 Author 登录拿到的 token")
+			resp, raw := srv.postJSON(t, "/api/users", body, map[string]string{
+				"Authorization": "Bearer " + token,
+			})
 
 			require.Equal(t, http.StatusConflict, resp.StatusCode, "body: %s", raw)
 			assert.Contains(t, raw, `"code":"CONFLICT"`)
@@ -450,17 +516,23 @@ func TestEndToEnd(t *testing.T) {
 		// Proves the functional unique index on lower(username) reaches
 		// all the way out to the HTTP contract.
 		t.Run("大小写不同的同名也返回 409", func(t *testing.T) {
+			require.NotEmpty(t, token, "依赖 Author 登录拿到的 token")
 			upper := fmt.Sprintf(
 				`{"username":%q,"email":"upper-%s","password":"correct-horse-battery"}`,
 				strings.ToUpper(username), email)
 
-			resp, raw := srv.post(t, "/api/users", upper)
+			resp, raw := srv.postJSON(t, "/api/users", upper, map[string]string{
+				"Authorization": "Bearer " + token,
+			})
 
 			require.Equal(t, http.StatusConflict, resp.StatusCode, "body: %s", raw)
 		})
 
 		t.Run("校验失败返回 400 且不泄露内部细节", func(t *testing.T) {
-			resp, raw := srv.post(t, "/api/users", `{"username":"ab","email":"nope","password":"x"}`)
+			require.NotEmpty(t, token, "依赖 Author 登录拿到的 token")
+			resp, raw := srv.postJSON(t, "/api/users",
+				`{"username":"ab","email":"nope","password":"x"}`,
+				map[string]string{"Authorization": "Bearer " + token})
 
 			require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 			assert.Contains(t, raw, `"code":"VALIDATION_FAILED"`)
@@ -472,8 +544,6 @@ func TestEndToEnd(t *testing.T) {
 		t.Run("迁移已在启动时执行", func(t *testing.T) {
 			rec := srv.recordWithMsg(t, "server listening")
 			require.NotNil(t, rec)
-			// A successful registration above already proves the users
-			// table exists; this just confirms the server got that far.
 			assert.Equal(t, "INFO", rec["level"])
 		})
 	})
@@ -494,12 +564,7 @@ func TestEndToEnd(t *testing.T) {
 		cleanupUsers(t, username)
 
 		const password = "correct-horse-battery"
-		register := fmt.Sprintf(
-			`{"username":%q,"email":"%s@example.com","password":%q}`,
-			username, username, password)
-
-		resp, raw := srv.post(t, "/api/users", register)
-		require.Equal(t, http.StatusCreated, resp.StatusCode, "body: %s", raw)
+		insertUser(t, username, username+"@example.com", password)
 
 		credentials := fmt.Sprintf(`{"username":%q,"password":%q}`, username, password)
 
@@ -754,10 +819,11 @@ func startServer(t *testing.T, bin string, env map[string]string) *server {
 
 	full := map[string]string{
 		"PORT": port,
-		// Both required for the process to start at all. A caller can
-		// still override either, which is how the failure cases work.
-		"DATABASE_URL": testDSN,
-		"JWT_SECRET":   testJWTSecret,
+		// Required for the process to start at all. A caller can still
+		// override any of them, which is how the failure cases work.
+		"DATABASE_URL":    testDSN,
+		"JWT_SECRET":      testJWTSecret,
+		"AUTHOR_USERNAME": testAuthorUsername,
 	}
 	for k, v := range env {
 		full[k] = v
@@ -863,10 +929,20 @@ func (s *server) output() string {
 // post sends a JSON body and returns the response with its text.
 func (s *server) post(t *testing.T, path, body string) (*http.Response, string) {
 	t.Helper()
+	return s.postJSON(t, path, body, nil)
+}
+
+// postJSON is post with extra headers, used when the caller must be
+// the Author.
+func (s *server) postJSON(t *testing.T, path, body string, headers map[string]string) (*http.Response, string) {
+	t.Helper()
 
 	req, err := http.NewRequest(http.MethodPost, s.url(path), strings.NewReader(body))
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", "application/json")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
 
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
@@ -876,6 +952,25 @@ func (s *server) post(t *testing.T, path, body string) (*http.Response, string) 
 	require.NoError(t, err)
 
 	return resp, string(raw)
+}
+
+// insertUser creates an account the way an operator does now that
+// public registration is closed: a bcrypt hash straight into users.
+func insertUser(t *testing.T, username, email, password string) {
+	t.Helper()
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.MinCost)
+	require.NoError(t, err)
+
+	ctx := t.Context()
+	pool, err := pgxpool.New(ctx, testDSN)
+	require.NoError(t, err)
+	defer pool.Close()
+
+	_, err = pool.Exec(ctx,
+		`INSERT INTO users (username, email, password_hash) VALUES ($1, $2, $3)`,
+		username, email, string(hash))
+	require.NoError(t, err)
 }
 
 // activeRefreshHash returns the newest unrevoked refresh-token hash for
@@ -1061,6 +1156,7 @@ func envWith(overrides map[string]string) []string {
 		"RATE_LIMIT_RPS", "RATE_LIMIT_BURST",
 		"LOGIN_RATE_LIMIT_RPM", "LOGIN_RATE_LIMIT_BURST",
 		"JWT_SECRET", "ACCESS_TOKEN_TTL", "REFRESH_TOKEN_TTL",
+		"AUTHOR_USERNAME",
 	}
 
 	drop := make(map[string]bool, len(managed))
@@ -1076,9 +1172,13 @@ func envWith(overrides map[string]string) []string {
 		env = append(env, kv)
 	}
 
-	// Seeded before the overrides so a case can blank either to exercise
-	// the missing-configuration paths.
-	env = append(env, "DATABASE_URL="+testDSN, "JWT_SECRET="+testJWTSecret)
+	// Seeded before the overrides so a case can blank any of them to
+	// exercise the missing-configuration paths.
+	env = append(env,
+		"DATABASE_URL="+testDSN,
+		"JWT_SECRET="+testJWTSecret,
+		"AUTHOR_USERNAME="+testAuthorUsername,
+	)
 
 	for k, v := range overrides {
 		env = append(env, k+"="+v)

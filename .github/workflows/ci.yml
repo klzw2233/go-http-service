@@ -121,6 +121,7 @@ jobs:
     # `:?` 校验失败而报错。
     env:
       JWT_SECRET: ci-test-secret-do-not-use-in-production-0123456789
+      AUTHOR_USERNAME: jimmy
     steps:
       - name: 检出代码
         uses: actions/checkout@v7

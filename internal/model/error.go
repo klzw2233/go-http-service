@@ -33,6 +33,11 @@ const (
 	// applies tells an attacker how close they are.
 	ErrCodeUnauthorized ErrorCode = "UNAUTHORIZED"
 
+	// ErrCodeForbidden means the caller authenticated but is not
+	// allowed to do this. Distinct from UNAUTHORIZED so a signed-in
+	// non-Author is not told to "log in".
+	ErrCodeForbidden ErrorCode = "FORBIDDEN"
+
 	// ErrCodeRateLimited means the caller exceeded its request budget.
 	ErrCodeRateLimited ErrorCode = "RATE_LIMITED"
 

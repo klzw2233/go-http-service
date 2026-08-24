@@ -1,8 +1,8 @@
 # Go HTTP Service
 
 > Backend Engineer 学习路线的第一个实战项目：从零搭建一个 Go HTTP 服务。
-> 当前已完成注册、登录、JWT、refresh 轮转、按 IP 限流、CORS 与安全响应头，
-> 并已容器化（多阶段 distroless 镜像 + compose 编排），有 CI 与端到端测试保障。
+> 当前已完成登录、JWT、refresh 轮转、按 IP 限流、CORS 与安全响应头，
+> 公开注册已关闭（仅配置的 Author 可建账号），并已容器化（多阶段 distroless 镜像 + compose 编排），有 CI 与端到端测试保障。
 
 ---
 
@@ -14,7 +14,7 @@
 - 按分层架构组织代码，依赖通过构造函数注入而非包级变量
 - 对外契约稳定：统一的错误响应结构，绝不泄露内部实现细节
 - 具备生产服务的基本要素：超时、优雅关闭、结构化日志、探针、限流、CORS 与安全响应头
-- 用户可注册、登录，受保护接口走 JWT；refresh token 带轮转与重放检测
+- 公开注册已关闭；第一个 Author 由运维插入。登录后受保护接口走 JWT；refresh token 带轮转与重放检测
 - 已容器化：多阶段 distroless 镜像 + compose 编排，CI 全流程保障
 
 ### 已完成的能力
@@ -31,7 +31,7 @@
 | 安全默认 | 不信任任何代理、请求体上限、panic 不泄露堆栈 |
 | 安全响应头 | 每个响应都带 `nosniff`、`DENY`、`HSTS`、`Cache-Control: no-store` 等 |
 | CORS | fail-closed：未配置时拒绝所有跨域，配置后按 origin 精确匹配 |
-| 用户注册 | `POST /api/users`，bcrypt 哈希、唯一约束防 TOCTOU |
+| 关闭公开注册 | 未认证 `POST /api/users` 返回 403；仅 `AUTHOR_USERNAME` 指名的 Author 可建账号 |
 | 登录与 JWT | `POST /api/auth/login`，HS256，失败响应完全一致 |
 | Refresh 轮转 | 每次刷新作废旧 token；重放则撤销该用户全部会话 |
 | 按 IP 限流 | 全局宽松 + 登录严格，探针豁免；内存实现，每副本独立 |
@@ -76,7 +76,8 @@ go-http-service/
 │   │   ├── ready.go             # /api/ready    readiness（可挂依赖检查）
 │   │   ├── info.go              # /api/info
 │   │   ├── echo.go              # /api/echo
-│   │   ├── user.go              # /api/users    注册
+│   │   ├── user.go              # /api/users    建账号（仅 Author）
+│   │   ├── author.go            # 关闭匿名注册、Author 校验
 │   │   ├── auth.go              # 登录 / 刷新 / 登出 / me、认证中间件
 │   │   ├── ratelimit.go         # 按 IP 令牌桶 + 空闲淘汰
 │   │   ├── cors.go              # fail-closed CORS（按 origin 精确匹配）
@@ -127,18 +128,19 @@ cd ~/workspace/go-http-service
 
 ### 2. 运行服务
 
-`DATABASE_URL` 和 `JWT_SECRET` 都是必需项，未设置进程会拒绝启动：
+`DATABASE_URL`、`JWT_SECRET` 和 `AUTHOR_USERNAME` 都是必需项，未设置进程会拒绝启动：
 
 ```bash
 DATABASE_URL="postgres://app:devsecret@127.0.0.1:5433/go_http_service?sslmode=disable" \
 JWT_SECRET="$(openssl rand -base64 48)" \
+AUTHOR_USERNAME=jimmy \
   go run cmd/server/main.go
 ```
 
 默认监听 `8080`。需要换端口时通过 `PORT` 环境变量指定，无需重新编译：
 
 ```bash
-PORT=9000 DATABASE_URL="..." JWT_SECRET="..." go run cmd/server/main.go
+PORT=9000 DATABASE_URL="..." JWT_SECRET="..." AUTHOR_USERNAME=jimmy go run cmd/server/main.go
 ```
 
 服务收到 `Ctrl+C`（SIGINT）或 `SIGTERM` 时会优雅关闭：停止接收新连接，
@@ -212,28 +214,21 @@ curl -X POST http://localhost:8080/api/echo \
 {"message":"hello","echoed_at":"..."}
 ```
 
-#### 注册用户
+#### 第一个 Author 账号（运维插入）
+
+公开注册已关闭。未认证的 `POST /api/users` 返回 `403` + `FORBIDDEN`，不是 `401`：这是权限拒绝，不是提示去登录。第一个 Author 由运维直接插入 `users` 表（bcrypt 哈希，不是明文）：
 
 ```bash
-curl -i -X POST http://localhost:8080/api/users \
-  -H "Content-Type: application/json" \
-  -d '{"username":"jimmy","email":"jimmy@example.com","password":"correct-horse"}'
+# 生成哈希后插入。cost 用默认 10 即可。
+HASH="$(python -c 'import bcrypt; print(bcrypt.hashpw(b"correct-horse", bcrypt.gensalt()).decode())')"
+psql "$DATABASE_URL" -c "INSERT INTO users (username, email, password_hash) VALUES ('jimmy', 'jimmy@example.com', '$HASH')"
 ```
 
-预期返回 `201`：
-
-```json
-{
-  "id": 1,
-  "username": "jimmy",
-  "email": "jimmy@example.com",
-  "created_at": "2026-08-23T12:00:00Z"
-}
-```
+`AUTHOR_USERNAME` 必须与这行的 `username` 大小写不敏感地一致（唯一索引建在 `lower(username)` 上）。插好之后用登录接口换 token。已登录的 Author 仍可 `POST /api/users` 再建账号（运维便利）；已登录但不是 Author 的用户同样是 `403`。
 
 **响应里没有任何密码字段**，连 `password_hash` 也没有。见下文「密码处理」。
 
-重复注册（包括大小写不同的同名）返回 `409`：
+重复用户名（包括大小写不同的同名）返回 `409`：
 
 ```json
 {"code":"CONFLICT","message":"that username is already taken"}
@@ -316,8 +311,9 @@ go build -ldflags "-X go-http-service/internal/model.Version=$(git describe --ta
 `gcr.io/distroless/static-debian12:nonroot`，镜像 ~10MB、无 shell、非 root 运行。
 
 ```bash
-# JWT_SECRET 是必需项，从宿主机环境变量读，不写进 compose 文件
+# JWT_SECRET 与 AUTHOR_USERNAME 都是必需项，从宿主机环境变量读，不写进 compose 文件
 export JWT_SECRET="$(openssl rand -base64 48)"
+export AUTHOR_USERNAME=jimmy
 
 # --wait 会等到 db 的 healthcheck 通过
 docker compose up -d --wait
@@ -332,7 +328,7 @@ curl http://localhost:8080/api/info            # version 字段是注入的 dev
 - `DATABASE_URL` 里 host 写的是 compose 服务名 `db`，不是 `127.0.0.1`——
   容器之间走 compose 网络，`127.0.0.1` 会指 app 容器自己，连不到数据库。
 - `JWT_SECRET` 用 `${JWT_SECRET:?...}` 从宿主机读，**不写进文件**（会进 git）。
-  未设置时 `compose up` 直接报错，而不是静默用空值。
+  未设置时 `compose up` 直接报错，而不是静默用空值。`AUTHOR_USERNAME` 同理：它不是密钥，但仍是必需项，未设置进程拒绝启动。
 - `depends_on: db: condition: service_healthy` 让 app 等 db 就绪后启动，
   避免 app 首次连接就失败的启动竞态。
 - db 映射 `127.0.0.1:5433:5432`，和本机开发库约定一致，只绑回环不暴露公网。
@@ -450,6 +446,7 @@ psql "postgres://app:devsecret@127.0.0.1:5433/go_http_service"   # 连进去
 ```bash
 DATABASE_URL="postgres://app:devsecret@127.0.0.1:5433/go_http_service?sslmode=disable" \
 JWT_SECRET="$(openssl rand -base64 48)" \
+AUTHOR_USERNAME=jimmy \
   go run cmd/server/main.go
 ```
 
@@ -583,7 +580,7 @@ Service 把它翻译成自己的同名错误，Handler 只匹配 Service 的错�
 | GET | `/api/ready` | 就绪探针（readiness） |
 | GET | `/api/info` | 返回服务元信息 |
 | POST | `/api/echo` | 接收 JSON 并回显 |
-| POST | `/api/users` | 注册用户 |
+| POST | `/api/users` | 建账号（仅 Author；未认证 / 非 Author 返回 403） |
 | POST | `/api/auth/login` | 登录，返回 access + refresh |
 | POST | `/api/auth/refresh` | 用 refresh 换新的一对 |
 | POST | `/api/auth/logout` | 撤销该 refresh token |
@@ -660,6 +657,7 @@ curl -o /dev/null -w '%{http_code}\n' localhost:8080/api/ready    # 恢复 200
 | `NOT_FOUND` | 404 | 路径不存在 |
 | `METHOD_NOT_ALLOWED` | 405 | 路径存在，但不支持该 HTTP 方法（响应带 `Allow` 头） |
 | `UNAUTHORIZED` | 401 | 缺少或无法使用的凭据。缺 token、格式错、过期、签名无效、用户不存在、密码错误、refresh 重放，全部是这一条 |
+| `FORBIDDEN` | 403 | 已认证但无权执行该操作（例如非 Author 写接口）；未认证的 `POST /api/users` 也是这一条，不是 401 |
 | `CONFLICT` | 409 | 与已有数据冲突，如注册了别人已占用的用户名 |
 | `PAYLOAD_TOO_LARGE` | 413 | 请求体超过 `MAX_BODY_BYTES` 上限 |
 | `RATE_LIMITED` | 429 | 超过该地址的请求预算，响应带 `Retry-After` |
@@ -717,6 +715,7 @@ server stopped with an error  error="config: PORT must be a number, got \"abc\""
 | `DB_MAX_CONNS` | `10` | 连接池上限 |
 | `DB_CONNECT_TIMEOUT` | `5s` | 建连超时，同时用作就绪探测的超时 |
 | `JWT_SECRET` | **必需**，至少 32 字节 | HS256 签名密钥，启动日志脱敏为 `(set)` |
+| `AUTHOR_USERNAME` | **必需**，3–32 位字母数字 | 可写 Posts 的 User 名，大小写不敏感；启动日志原样写出（不是密钥） |
 | `ACCESS_TOKEN_TTL` | `15m` | access token 有效期 |
 | `REFRESH_TOKEN_TTL` | `720h` | refresh token 有效期（30 天） |
 | `RATE_LIMIT_RPS` | `20` | 全局限流（探针除外），每地址每秒 |
@@ -733,6 +732,9 @@ server stopped with an error  error="config: PORT must be a number, got \"abc\""
 密钥熵，短密钥可以离线爆破，之后攻击者能给任意用户签发 token。
 生成一个：`openssl rand -base64 48`。启动日志里这个字段是 `(set)`，
 连长度都不保留——长度会缩小爆破搜索空间。
+
+关于 `AUTHOR_USERNAME`：必需，3–32 位 ASCII 字母或数字，与 `users.username` 大小写不敏感地比较。
+它是名字不是密钥，启动日志原样写出。第一个匹配的 User 由运维 SQL 插入，本服务不提供 seed / 管理后台。
 
 `DB_MAX_CONNS` 显式固定连接池上限，而不是用 pgx 的默认值（`max(4, CPU 核数)`）——
 后者会让同一个服务换台机器部署就对数据库产生不同的压力。

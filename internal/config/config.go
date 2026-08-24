@@ -166,6 +166,12 @@ type Config struct {
 	// Env: REFRESH_TOKEN_TTL.
 	RefreshTokenTTL time.Duration
 
+	// AuthorUsername is the User who may write Posts. Env: AUTHOR_USERNAME.
+	//
+	// Required. Compared case-insensitively with users.username, matching
+	// the unique index on lower(username). It is a name, not a secret.
+	AuthorUsername string
+
 	// LogLevel is the minimum level to emit. Env: LOG_LEVEL.
 	LogLevel slog.Level
 
@@ -195,6 +201,7 @@ func Load() (*Config, error) {
 		LogFormat:          strings.ToLower(envString("LOG_FORMAT", DefaultLogFormat)),
 		DatabaseURL:        envString("DATABASE_URL", ""),
 		JWTSecret:          envString("JWT_SECRET", ""),
+		AuthorUsername:     envString("AUTHOR_USERNAME", ""),
 	}
 
 	var err error
@@ -329,6 +336,16 @@ func (c *Config) validate() []error {
 			MinJWTSecretLen, len(c.JWTSecret)))
 	}
 
+	switch {
+	case c.AuthorUsername == "":
+		errs = append(errs, errors.New(
+			"AUTHOR_USERNAME is required; it names the User who may write Posts"))
+	case !validAuthorUsername(c.AuthorUsername):
+		errs = append(errs, fmt.Errorf(
+			"AUTHOR_USERNAME must be 3-32 alphanumeric characters, got %q",
+			c.AuthorUsername))
+	}
+
 	return errs
 }
 
@@ -368,6 +385,7 @@ func (c *Config) LogValue() slog.Value {
 		slog.String("jwt_secret", redactSecret(c.JWTSecret)),
 		slog.String("access_token_ttl", c.AccessTokenTTL.String()),
 		slog.String("refresh_token_ttl", c.RefreshTokenTTL.String()),
+		slog.String("author_username", c.AuthorUsername),
 		slog.String("log_level", c.LogLevel.String()),
 		slog.String("log_format", c.LogFormat),
 	)
@@ -416,6 +434,28 @@ func redactSecret(secret string) string {
 		return dsnUnset
 	}
 	return dsnOpaque
+}
+
+// validAuthorUsername is the same shape as a users.username: 3-32
+// ASCII letters or digits. Duplicated here so config does not import model.
+func validAuthorUsername(s string) bool {
+	if n := len(s); n < 3 || n > 32 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'a' && c <= 'z' {
+			continue
+		}
+		if c >= 'A' && c <= 'Z' {
+			continue
+		}
+		if c >= '0' && c <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func validatePort(p string) error {
