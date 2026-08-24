@@ -68,6 +68,13 @@ func SetupRouter(api *API) *gin.Engine {
 		limited.GET("/info", api.Info)
 		limited.POST("/echo", api.Echo)
 		limited.POST("/users", api.forbidAnonymous(), api.requireAuth(), api.requireAuthor(), api.CreateUser)
+		// Post writes/reads are Author-only: requireAuth answers 401 (with
+		// WWW-Authenticate) for anonymous callers so there is no public JSON
+		// feed, and requireAuthor answers 403 for a signed-in non-Author.
+		limited.POST("/posts", api.requireAuth(), api.requireAuthor(), api.CreatePost)
+		limited.GET("/posts", api.requireAuth(), api.requireAuthor(), api.ListPosts)
+		limited.GET("/posts/:slug", api.requireAuth(), api.requireAuthor(), api.GetPost)
+		limited.PATCH("/posts/:slug", api.requireAuth(), api.requireAuthor(), api.UpdatePost)
 	}
 
 	loginLimiter := newIPRateLimiter(

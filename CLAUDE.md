@@ -305,6 +305,7 @@ internal/handler/           HTTP 层
   auth.go                   登录 / 刷新 / 登出 / me、认证中间件
   author.go                 关闭匿名注册、Author 校验（EqualFold）
   user.go                   POST /api/users，仅 Author
+  post.go                   /api/posts Draft 增/查/列/改，仅 Author
   ratelimit.go              按 IP 令牌桶 + 空闲淘汰
   cors.go                   fail-closed CORS（按 origin 精确匹配）
   headers.go                安全响应头（每个响应都带）
@@ -368,7 +369,7 @@ CORS 默认 fail-closed：`CORS_ALLOWED_ORIGINS` 留空时不回任何 `Access-C
 6. ~~补充中间件：CORS、安全响应头~~ 已完成
 7. ~~使用 Docker 容器化部署~~ 已完成
 8. ~~尝试 Kubernetes 部署~~ 暂缓；当前方向是个人博客
-9. 博客：#2 命名 Author 并关闭公开注册（进行中）→ #3 Draft JSON → #4 Publish/HTML → #5 Author 区浏览器
+9. 博客：#2 命名 Author 并关闭公开注册 → #3 Draft JSON（进行中）→ #4 Publish/HTML → #5 Author 区浏览器
 
 ### 步骤 C 已落地的规矩（后续直接沿用）
 

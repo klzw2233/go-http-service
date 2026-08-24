@@ -96,10 +96,14 @@ func run() error {
 		return fmt.Errorf("auth service: %w", err)
 	}
 
+	postRepo := repository.NewPostRepository(pool)
+	posts := service.NewPostService(postRepo)
+
 	api := handler.New(cfg, logger,
 		handler.WithUserService(users),
 		handler.WithAuthService(authSvc),
 		handler.WithTokenVerifier(tokens),
+		handler.WithPostService(posts),
 		handler.WithReadyCheck("database", db.HealthCheck(pool, cfg.DBConnectTimeout)),
 	)
 
