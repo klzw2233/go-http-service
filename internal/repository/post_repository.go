@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -146,6 +147,87 @@ func (r *PostRepository) UpdateTitleBody(ctx context.Context, slug, title, body 
 		return nil, fmt.Errorf("update post: %w", err)
 	}
 	return &p, nil
+}
+
+// Publish marks the Post published. published_at is set only on the first
+// successful Publish (COALESCE): a second Publish is idempotent and keeps
+// the original time, which is what Home sorts by after an Unpublish
+// (ADR-0005). ErrPostNotFound if no row has that slug.
+func (r *PostRepository) Publish(ctx context.Context, slug string, now time.Time) (*model.Post, error) {
+	const query = `
+		UPDATE posts
+		SET published = true,
+		    published_at = COALESCE(published_at, $2),
+		    updated_at = now()
+		WHERE slug = $1
+		RETURNING id, slug, title, body, published, published_at, created_at, updated_at`
+
+	var p model.Post
+	err := r.pool.QueryRow(ctx, query, slug, now).Scan(
+		&p.ID, &p.Slug, &p.Title, &p.Body, &p.Published, &p.PublishedAt,
+		&p.CreatedAt, &p.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrPostNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("publish post: %w", err)
+	}
+	return &p, nil
+}
+
+// Unpublish returns a Published Post to a Draft. published_at is left
+// alone so Home can still sort by first publication after a take-down.
+// Unpublish of a Draft is idempotent: the row is found, published is
+// already false, and the same row comes back. ErrPostNotFound if no row.
+func (r *PostRepository) Unpublish(ctx context.Context, slug string) (*model.Post, error) {
+	const query = `
+		UPDATE posts
+		SET published = false, updated_at = now()
+		WHERE slug = $1
+		RETURNING id, slug, title, body, published, published_at, created_at, updated_at`
+
+	var p model.Post
+	err := r.pool.QueryRow(ctx, query, slug).Scan(
+		&p.ID, &p.Slug, &p.Title, &p.Body, &p.Published, &p.PublishedAt,
+		&p.CreatedAt, &p.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrPostNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("unpublish post: %w", err)
+	}
+	return &p, nil
+}
+
+// ListPublished returns only Published Posts, newest first Publish time
+// first. The public Home must never see a Draft.
+func (r *PostRepository) ListPublished(ctx context.Context) ([]model.Post, error) {
+	const query = `
+		SELECT id, slug, title, body, published, published_at, created_at, updated_at
+		FROM posts
+		WHERE published = true
+		ORDER BY published_at DESC`
+
+	rows, err := r.pool.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("list published posts: %w", err)
+	}
+	defer rows.Close()
+
+	var out []model.Post
+	for rows.Next() {
+		var p model.Post
+		if err := rows.Scan(
+			&p.ID, &p.Slug, &p.Title, &p.Body, &p.Published, &p.PublishedAt,
+			&p.CreatedAt, &p.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan published post: %w", err)
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list published posts: %w", err)
+	}
+	return out, nil
 }
 
 // translatePostCreateError maps a driver error onto this layer's vocabulary.

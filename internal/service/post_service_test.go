@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -78,6 +79,46 @@ func (s *fakePostStore) UpdateTitleBody(ctx context.Context, slug, title, body s
 	p.Body = body
 	c := *p
 	return &c, nil
+}
+
+func (s *fakePostStore) Publish(ctx context.Context, slug string, now time.Time) (*model.Post, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.rows[slug]
+	if !ok {
+		return nil, repository.ErrPostNotFound
+	}
+	p.Published = true
+	if p.PublishedAt == nil {
+		t := now
+		p.PublishedAt = &t
+	}
+	c := *p
+	return &c, nil
+}
+
+func (s *fakePostStore) Unpublish(ctx context.Context, slug string) (*model.Post, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.rows[slug]
+	if !ok {
+		return nil, repository.ErrPostNotFound
+	}
+	p.Published = false
+	c := *p
+	return &c, nil
+}
+
+func (s *fakePostStore) ListPublished(ctx context.Context) ([]model.Post, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []model.Post
+	for _, p := range s.rows {
+		if p.Published {
+			out = append(out, *p)
+		}
+	}
+	return out, nil
 }
 
 func validCreateInput() CreatePostInput {
@@ -414,4 +455,82 @@ func TestUpdatePost_RejectsTooLargeBody(t *testing.T) {
 	})
 
 	require.ErrorIs(t, err, ErrBodyTooLarge)
+}
+
+func TestPublishPost_SetsPublishedAtOnce(t *testing.T) {
+	t.Parallel()
+
+	store := newFakePostStore()
+	first := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	later := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	svc := NewPostService(store, WithPostClock(func() time.Time { return first }))
+
+	created, err := svc.CreatePost(t.Context(), validCreateInput())
+	require.NoError(t, err)
+
+	published, err := svc.PublishPost(t.Context(), created.Slug)
+	require.NoError(t, err)
+	require.True(t, published.Published)
+	require.NotNil(t, published.PublishedAt)
+	assert.True(t, published.PublishedAt.Equal(first))
+
+	svc.now = func() time.Time { return later }
+	again, err := svc.PublishPost(t.Context(), created.Slug)
+	require.NoError(t, err)
+	require.NotNil(t, again.PublishedAt)
+	assert.True(t, again.PublishedAt.Equal(first), "再次 Publish 应保留首次 published_at")
+}
+
+func TestUnpublishPost_KeepsPublishedAt(t *testing.T) {
+	t.Parallel()
+
+	store := newFakePostStore()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	svc := NewPostService(store, WithPostClock(func() time.Time { return when }))
+
+	created, err := svc.CreatePost(t.Context(), validCreateInput())
+	require.NoError(t, err)
+	_, err = svc.PublishPost(t.Context(), created.Slug)
+	require.NoError(t, err)
+
+	draft, err := svc.UnpublishPost(t.Context(), created.Slug)
+	require.NoError(t, err)
+	assert.False(t, draft.Published)
+	require.NotNil(t, draft.PublishedAt)
+	assert.True(t, draft.PublishedAt.Equal(when))
+
+	again, err := svc.UnpublishPost(t.Context(), created.Slug)
+	require.NoError(t, err)
+	assert.False(t, again.Published, "Draft 再 Unpublish 应幂等")
+}
+
+func TestGetPublishedPost_HidesDraft(t *testing.T) {
+	t.Parallel()
+
+	store := newFakePostStore()
+	svc := NewPostService(store)
+	created, err := svc.CreatePost(t.Context(), validCreateInput())
+	require.NoError(t, err)
+
+	_, err = svc.GetPublishedPost(t.Context(), created.Slug)
+	require.ErrorIs(t, err, ErrPostNotFound)
+
+	_, err = svc.PublishPost(t.Context(), created.Slug)
+	require.NoError(t, err)
+	got, err := svc.GetPublishedPost(t.Context(), created.Slug)
+	require.NoError(t, err)
+	assert.True(t, got.Published)
+}
+
+func TestListPublishedPosts_OmitsDrafts(t *testing.T) {
+	t.Parallel()
+
+	store := newFakePostStore()
+	svc := NewPostService(store)
+	_, err := svc.CreatePost(t.Context(), validCreateInput())
+	require.NoError(t, err)
+
+	got, err := svc.ListPublishedPosts(t.Context())
+	require.NoError(t, err)
+	assert.Empty(t, got)
 }

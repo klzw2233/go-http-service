@@ -753,6 +753,46 @@ func TestEndToEnd(t *testing.T) {
 			"登录被限流时探针仍须可用")
 	})
 
+	t.Run("publish then public html", func(t *testing.T) {
+		author := fmt.Sprintf("blog%d", time.Now().UnixNano())
+		cleanupUsers(t, author)
+
+		const password = "correct-horse-battery"
+		srv := startServer(t, bin, map[string]string{
+			"AUTHOR_USERNAME":        author,
+			"LOGIN_RATE_LIMIT_RPM":   "60",
+			"LOGIN_RATE_LIMIT_BURST": "30",
+		})
+		insertUser(t, author, author+"@example.com", password)
+
+		resp, raw := srv.post(t, "/api/auth/login",
+			fmt.Sprintf(`{"username":%q,"password":%q}`, author, password))
+		require.Equal(t, http.StatusOK, resp.StatusCode, "body: %s", raw)
+		var pair struct {
+			AccessToken string `json:"access_token"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(raw), &pair))
+
+		slug := "hello-" + author
+		createBody := fmt.Sprintf(
+			`{"title":"Hello World","slug":%q,"body":"# Hello"}`, slug)
+		resp, raw = srv.postJSON(t, "/api/posts", createBody, map[string]string{
+			"Authorization": "Bearer " + pair.AccessToken,
+		})
+		require.Equal(t, http.StatusCreated, resp.StatusCode, "body: %s", raw)
+
+		resp, raw = srv.postJSON(t, "/api/posts/"+slug+"/publish", "{}", map[string]string{
+			"Authorization": "Bearer " + pair.AccessToken,
+		})
+		require.Equal(t, http.StatusOK, resp.StatusCode, "body: %s", raw)
+
+		resp, page := srv.get(t, "/posts/"+slug)
+		require.Equal(t, http.StatusOK, resp.StatusCode, "body: %s", page)
+		assert.Contains(t, page, "Hello World")
+		assert.Contains(t, resp.Header.Get("Content-Type"), "text/html")
+		assert.Equal(t, "no-store", resp.Header.Get("Cache-Control"))
+	})
+
 	t.Run("数据库连不上时拒绝启动", func(t *testing.T) {
 		cmd := exec.Command(bin)
 		// 192.0.2.1 是 RFC 5737 保留的不可路由地址。

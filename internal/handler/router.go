@@ -75,7 +75,14 @@ func SetupRouter(api *API) *gin.Engine {
 		limited.GET("/posts", api.requireAuth(), api.requireAuthor(), api.ListPosts)
 		limited.GET("/posts/:slug", api.requireAuth(), api.requireAuthor(), api.GetPost)
 		limited.PATCH("/posts/:slug", api.requireAuth(), api.requireAuthor(), api.UpdatePost)
+		limited.POST("/posts/:slug/publish", api.requireAuth(), api.requireAuthor(), api.PublishPost)
+		limited.POST("/posts/:slug/unpublish", api.requireAuth(), api.requireAuthor(), api.UnpublishPost)
 	}
+
+	// Public HTML is outside /api and outside the rate-limit group. It still
+	// inherits the global middleware, including Cache-Control: no-store.
+	r.GET("/", api.Home)
+	r.GET("/posts/:slug", api.PostPage)
 
 	loginLimiter := newIPRateLimiter(
 		rate.Limit(api.cfg.LoginRateLimitRPM)/60, int(api.cfg.LoginRateLimitBurst))

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"time"
 	"unicode/utf8"
 
 	"go-http-service/internal/model"
@@ -39,16 +40,36 @@ type postStore interface {
 	FindBySlug(ctx context.Context, slug string) (*model.Post, error)
 	ListAll(ctx context.Context) ([]model.Post, error)
 	UpdateTitleBody(ctx context.Context, slug, title, body string) (*model.Post, error)
+	Publish(ctx context.Context, slug string, now time.Time) (*model.Post, error)
+	Unpublish(ctx context.Context, slug string) (*model.Post, error)
+	ListPublished(ctx context.Context) ([]model.Post, error)
 }
 
 // PostService implements Post operations.
 type PostService struct {
 	posts postStore
+	now   func() time.Time
+}
+
+// PostOption customises a PostService.
+type PostOption func(*PostService)
+
+// WithPostClock replaces the time source so tests can pin published_at
+// without sleeping. Production uses UTC now.
+func WithPostClock(now func() time.Time) PostOption {
+	return func(s *PostService) { s.now = now }
 }
 
 // NewPostService builds a service over the given store.
-func NewPostService(posts postStore) *PostService {
-	return &PostService{posts: posts}
+func NewPostService(posts postStore, opts ...PostOption) *PostService {
+	s := &PostService{
+		posts: posts,
+		now:   func() time.Time { return time.Now().UTC() },
+	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // CreatePostInput carries the values needed to create a Post.
@@ -163,6 +184,49 @@ func (s *PostService) UpdatePost(ctx context.Context, in UpdatePostInput) (*mode
 		return nil, translatePostError(err)
 	}
 	return updated, nil
+}
+
+// PublishPost makes a Draft publicly readable. Publishing an already
+// Published Post is idempotent: the first published_at is kept.
+func (s *PostService) PublishPost(ctx context.Context, slug string) (*model.Post, error) {
+	post, err := s.posts.Publish(ctx, slug, s.now())
+	if err != nil {
+		return nil, translatePostError(err)
+	}
+	return post, nil
+}
+
+// UnpublishPost returns a Published Post to a Draft without clearing
+// published_at. Unpublishing a Draft is idempotent success.
+func (s *PostService) UnpublishPost(ctx context.Context, slug string) (*model.Post, error) {
+	post, err := s.posts.Unpublish(ctx, slug)
+	if err != nil {
+		return nil, translatePostError(err)
+	}
+	return post, nil
+}
+
+// ListPublishedPosts returns only Published Posts for the public Home.
+func (s *PostService) ListPublishedPosts(ctx context.Context) ([]model.Post, error) {
+	posts, err := s.posts.ListPublished(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list published posts: %w", err)
+	}
+	return posts, nil
+}
+
+// GetPublishedPost returns a Post only if it is currently Published.
+// A Draft looks the same as a missing slug (ErrPostNotFound) so the
+// public HTML 404 cannot leak whether a slug is reserved.
+func (s *PostService) GetPublishedPost(ctx context.Context, slug string) (*model.Post, error) {
+	post, err := s.posts.FindBySlug(ctx, slug)
+	if err != nil {
+		return nil, translatePostError(err)
+	}
+	if !post.Published {
+		return nil, ErrPostNotFound
+	}
+	return post, nil
 }
 
 // validateSlug rejects a slug that is not the author-chosen ASCII shape.

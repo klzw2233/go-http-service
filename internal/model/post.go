@@ -22,6 +22,11 @@ const (
 	// public URL. Enforced in the service layer (regex) so the database
 	// constraint only has to guard uniqueness, not shape.
 	SlugPattern = `^[a-z0-9]+(?:-[a-z0-9]+)*$`
+
+	// SiteName is the public blog title. Distinct from Name, which identifies
+	// the Go service. Home uses this as <title> and <h1>; a Post page uses
+	// "{Title} · {SiteName}".
+	SiteName = "Personal Blog - klzw2233"
 )
 
 // Post is a blog Post row as stored in the database.

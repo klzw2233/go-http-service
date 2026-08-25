@@ -33,6 +33,7 @@
 | CORS | fail-closed：未配置时拒绝所有跨域，配置后按 origin 精确匹配 |
 | 关闭公开注册 | 未认证 `POST /api/users` 返回 403；仅 `AUTHOR_USERNAME` 指名的 Author 可建账号 |
 | Draft JSON | Author 通过 `/api/posts` 增/查/列/改 Draft；slug 创建时选定、不可改、含 Draft 全局唯一 |
+| 公开 HTML 博客 | `GET /` 与 `GET /posts/{slug}` 渲染 Published Posts；Draft 与未知 slug 同一 HTML 404 |
 | 登录与 JWT | `POST /api/auth/login`，HS256，失败响应完全一致 |
 | Refresh 轮转 | 每次刷新作废旧 token；重放则撤销该用户全部会话 |
 | 按 IP 限流 | 全局宽松 + 登录严格，探针豁免；内存实现，每副本独立 |
@@ -73,6 +74,7 @@ go-http-service/
 │   │   ├── user_service.go      # 注册业务规则、bcrypt
 │   │   ├── auth_service.go      # 登录、刷新、登出、计时拉平
 │   │   └── post_service.go      # Post 增/查/列/改、slug/title/body 校验
+│   ├── markdown/                # 安全 CommonMark 渲染（goldmark + scheme 白名单）
 │   ├── handler/
 │   │   ├── api.go               # API 结构体：依赖注入的载体
 │   │   ├── router.go            # 路由注册、中间件顺序、404/405/panic
@@ -83,6 +85,8 @@ go-http-service/
 │   │   ├── user.go              # /api/users    建账号（仅 Author）
 │   │   ├── author.go            # 关闭匿名注册、Author 校验
 │   │   ├── post.go              # /api/posts    Draft 增/查/列/改（仅 Author）
+│   │   ├── blog.go              # 公开 HTML：Home、Post 页、站点风格 404
+│   │   ├── templates/           # embed 进二进制的 HTML 模板
 │   │   ├── auth.go              # 登录 / 刷新 / 登出 / me、认证中间件
 │   │   ├── ratelimit.go         # 按 IP 令牌桶 + 空闲淘汰
 │   │   ├── cors.go              # fail-closed CORS（按 origin 精确匹配）
@@ -595,6 +599,10 @@ Service 把它翻译成自己的同名错误，Handler 只匹配 Service 的错�
 | GET | `/api/posts` | 列出全部含 Draft（仅 Author） |
 | GET | `/api/posts/:slug` | 取一个 Post（仅 Author；不存在 404） |
 | PATCH | `/api/posts/:slug` | 改 title 和/或 body（仅 Author）；slug 不可改 |
+| POST | `/api/posts/:slug/publish` | 发布（仅 Author；已发布则幂等） |
+| POST | `/api/posts/:slug/unpublish` | 撤回为 Draft（仅 Author；首次 published_at 保留） |
+| GET | `/` | 公开首页 HTML（Published Posts） |
+| GET | `/posts/:slug` | 公开文章 HTML；Draft/未知 slug 为站点风格 404 |
 
 ### health 与 ready 的区别
 
