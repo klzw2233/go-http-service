@@ -13,6 +13,9 @@ import (
 //go:embed templates/author.js
 var authorJS []byte
 
+//go:embed assets/site.css
+var siteCSS []byte
+
 type authorShellView struct {
 	SiteName string
 	Mode     string
@@ -56,6 +59,13 @@ func (a *API) AuthorJS(c *gin.Context) {
 	c.Header("Content-Type", "text/javascript; charset=utf-8")
 	c.Header("Cache-Control", "no-store")
 	c.Data(http.StatusOK, "text/javascript; charset=utf-8", authorJS)
+}
+
+// SiteCSS serves the shared stylesheet for public pages and the Author area.
+func (a *API) SiteCSS(c *gin.Context) {
+	c.Header("Content-Type", "text/css; charset=utf-8")
+	c.Header("Cache-Control", "no-store")
+	c.Data(http.StatusOK, "text/css; charset=utf-8", siteCSS)
 }
 
 // PreviewPost renders Body as safe HTML for the in-editor Preview.

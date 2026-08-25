@@ -2,11 +2,13 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Posts · {{.SiteName}}</title>
+<link rel="stylesheet" href="/site.css">
 </head>
 <body>
 <h1>Posts</h1>
-<p><a href="/author/new">New post</a> · <button type="button" id="logout">Sign out</button></p>
+<p class="actions"><a href="/author/new">New post</a> <button type="button" id="logout">Sign out</button></p>
 <table>
 <thead><tr><th>Title</th><th>Slug</th><th>State</th></tr></thead>
 <tbody id="rows"></tbody>

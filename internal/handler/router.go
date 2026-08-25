@@ -84,6 +84,7 @@ func SetupRouter(api *API) *gin.Engine {
 	// inherits the global middleware, including Cache-Control: no-store.
 	r.GET("/", api.Home)
 	r.GET("/posts/:slug", api.PostPage)
+	r.GET("/site.css", api.SiteCSS)
 	r.GET("/author/login", api.AuthorLogin)
 	r.GET("/author/posts", api.AuthorPosts)
 	r.GET("/author/new", api.AuthorNew)

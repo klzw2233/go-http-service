@@ -76,6 +76,33 @@ func TestAuthorNew_Shell(t *testing.T) {
 	assert.Contains(t, w.Body.String(), `data-mode="new"`)
 }
 
+func TestSiteCSS_Served(t *testing.T) {
+	t.Parallel()
+
+	w := request{method: http.MethodGet, path: "/site.css"}.
+		doOn(t, routerWithPosts(t, &stubPostService{}))
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Header().Get("Content-Type"), "text/css")
+	assert.Equal(t, "no-store", w.Header().Get("Cache-Control"))
+	body := w.Body.String()
+	assert.Contains(t, body, "prefers-color-scheme")
+	assert.Contains(t, body, "--bg")
+	assert.NotContains(t, body, secretDraftBody)
+}
+
+func TestHome_LinksStylesheet(t *testing.T) {
+	t.Parallel()
+
+	w := request{method: http.MethodGet, path: "/"}.
+		doOn(t, routerWithPosts(t, &stubPostService{}))
+
+	require.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	assert.Contains(t, body, `href="/site.css"`)
+	assert.Contains(t, body, `name="viewport"`)
+}
+
 func TestAuthorJS_ContainsBearerUsage(t *testing.T) {
 	t.Parallel()
 

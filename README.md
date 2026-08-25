@@ -35,6 +35,7 @@
 | Draft JSON | Author 通过 `/api/posts` 增/查/列/改 Draft；slug 创建时选定、不可改、含 Draft 全局唯一 |
 | 公开 HTML 博客 | `GET /` 与 `GET /posts/{slug}` 渲染 Published Posts；Draft 与未知 slug 同一 HTML 404 |
 | Author 区 | `/author/login`、`/author/posts`、编辑器；Bearer 放在 JS/sessionStorage，首屏不含 Draft Body |
+| 站点样式 | 手写 CSS embed 进二进制，`GET /site.css`；亮/暗跟随 `prefers-color-scheme` |
 | 登录与 JWT | `POST /api/auth/login`，HS256，失败响应完全一致 |
 | Refresh 轮转 | 每次刷新作废旧 token；重放则撤销该用户全部会话 |
 | 按 IP 限流 | 全局宽松 + 登录严格，探针豁免；内存实现，每副本独立 |
@@ -89,6 +90,7 @@ go-http-service/
 │   │   ├── blog.go              # 公开 HTML：Home、Post 页、站点风格 404
 │   │   ├── author_html.go       # /author/* HTML 壳与 Preview |
 │   │   ├── templates/           # embed 进二进制的 HTML 模板
+│   │   ├── assets/site.css      # 手写站点样式，embed 后由 GET /site.css 提供
 │   │   ├── auth.go              # 登录 / 刷新 / 登出 / me、认证中间件
 │   │   ├── ratelimit.go         # 按 IP 令牌桶 + 空闲淘汰
 │   │   ├── cors.go              # fail-closed CORS（按 origin 精确匹配）
