@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Posts · {{.SiteName}}</title>
+</head>
+<body>
+<h1>Posts</h1>
+<p><a href="/author/new">New post</a> · <button type="button" id="logout">Sign out</button></p>
+<table>
+<thead><tr><th>Title</th><th>Slug</th><th>State</th></tr></thead>
+<tbody id="rows"></tbody>
+</table>
+<p id="error" hidden></p>
+<p><a href="/">{{.SiteName}}</a></p>
+<script src="/author/app.js"></script>
+</body>
+</html>

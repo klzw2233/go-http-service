@@ -73,6 +73,7 @@ func SetupRouter(api *API) *gin.Engine {
 		// feed, and requireAuthor answers 403 for a signed-in non-Author.
 		limited.POST("/posts", api.requireAuth(), api.requireAuthor(), api.CreatePost)
 		limited.GET("/posts", api.requireAuth(), api.requireAuthor(), api.ListPosts)
+		limited.POST("/posts/preview", api.requireAuth(), api.requireAuthor(), api.PreviewPost)
 		limited.GET("/posts/:slug", api.requireAuth(), api.requireAuthor(), api.GetPost)
 		limited.PATCH("/posts/:slug", api.requireAuth(), api.requireAuthor(), api.UpdatePost)
 		limited.POST("/posts/:slug/publish", api.requireAuth(), api.requireAuthor(), api.PublishPost)
@@ -83,6 +84,11 @@ func SetupRouter(api *API) *gin.Engine {
 	// inherits the global middleware, including Cache-Control: no-store.
 	r.GET("/", api.Home)
 	r.GET("/posts/:slug", api.PostPage)
+	r.GET("/author/login", api.AuthorLogin)
+	r.GET("/author/posts", api.AuthorPosts)
+	r.GET("/author/new", api.AuthorNew)
+	r.GET("/author/posts/:slug", api.AuthorEdit)
+	r.GET("/author/app.js", api.AuthorJS)
 
 	loginLimiter := newIPRateLimiter(
 		rate.Limit(api.cfg.LoginRateLimitRPM)/60, int(api.cfg.LoginRateLimitBurst))
