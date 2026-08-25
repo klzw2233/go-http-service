@@ -4,7 +4,10 @@
   function tokens() {
     try {
       var raw = sessionStorage.getItem(TOKEN_KEY);
-      return raw ? JSON.parse(raw) : null;
+      if (!raw) return null;
+      var t = JSON.parse(raw);
+      if (!t || !t.access_token) return null;
+      return t;
     } catch (e) {
       return null;
     }
@@ -107,9 +110,20 @@
     });
   }
 
+  function afterLoginPath() {
+    var params = new URLSearchParams(location.search);
+    var next = params.get("next") || "/author/posts";
+    if (next.indexOf("/author/") !== 0) next = "/author/posts";
+    return next;
+  }
+
   function initLogin() {
     var form = document.getElementById("login-form");
     if (!form) return;
+    if (tokens()) {
+      location.replace(afterLoginPath());
+      return;
+    }
     form.addEventListener("submit", function (ev) {
       ev.preventDefault();
       showError("");
@@ -127,11 +141,12 @@
           return;
         }
         return res.json().then(function (pair) {
+          if (!pair || !pair.access_token) {
+            showError("Sign in failed.");
+            return;
+          }
           saveTokens(pair);
-          var params = new URLSearchParams(location.search);
-          var next = params.get("next") || "/author/posts";
-          if (next.indexOf("/author/") !== 0) next = "/author/posts";
-          location.replace(next);
+          location.replace(afterLoginPath());
         });
       }).catch(function () {
         showError("Sign in failed.");
