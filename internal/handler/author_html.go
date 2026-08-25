@@ -16,6 +16,9 @@ var authorJS []byte
 //go:embed assets/site.css
 var siteCSS []byte
 
+//go:embed assets/theme.js
+var themeJS []byte
+
 type authorShellView struct {
 	SiteName string
 	Mode     string
@@ -66,6 +69,14 @@ func (a *API) SiteCSS(c *gin.Context) {
 	c.Header("Content-Type", "text/css; charset=utf-8")
 	c.Header("Cache-Control", "no-store")
 	c.Data(http.StatusOK, "text/css; charset=utf-8", siteCSS)
+}
+
+// ThemeJS serves the light/dark toggle. It is public: it only writes
+// localStorage and a data-theme attribute, never tokens.
+func (a *API) ThemeJS(c *gin.Context) {
+	c.Header("Content-Type", "text/javascript; charset=utf-8")
+	c.Header("Cache-Control", "no-store")
+	c.Data(http.StatusOK, "text/javascript; charset=utf-8", themeJS)
 }
 
 // PreviewPost renders Body as safe HTML for the in-editor Preview.

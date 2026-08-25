@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{.Title}} · {{.SiteName}}</title>
+<script>try{var t=localStorage.getItem("theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)}catch(e){}</script>
 <link rel="stylesheet" href="/site.css">
 </head>
 <body>
@@ -12,6 +13,10 @@
 {{.BodyHTML}}
 </article>
 <p><a href="/">{{.SiteName}}</a></p>
-<footer><a href="/author/posts">Author</a></footer>
+<footer>
+<a href="/author/posts">Author</a>
+<button type="button" id="theme-toggle">Theme</button>
+</footer>
+<script src="/theme.js"></script>
 </body>
 </html>

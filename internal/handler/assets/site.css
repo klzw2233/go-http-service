@@ -1,5 +1,5 @@
 /* Shared stylesheet for public pages and the Author area.
-   Dual theme via prefers-color-scheme only — public pages stay JS-free. */
+   Default follows prefers-color-scheme. html[data-theme] overrides it. */
 
 :root {
   color-scheme: light dark;
@@ -26,7 +26,8 @@
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
     --bg: #161311;
     --fg: #f3ece4;
     --muted: #b3aaa1;
@@ -39,6 +40,25 @@
     --focus: #fb923c;
     --shadow: none;
   }
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #161311;
+  --fg: #f3ece4;
+  --muted: #b3aaa1;
+  --accent: #fb923c;
+  --accent-hover: #fdba74;
+  --border: #3a332d;
+  --surface: #1e1a17;
+  --code-bg: #2a241f;
+  --error: #f97066;
+  --focus: #fb923c;
+  --shadow: none;
 }
 
 *,
@@ -224,6 +244,10 @@ article a,
 }
 
 footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.25rem;
+  align-items: center;
   margin-top: 3rem;
   padding-top: 1rem;
   border-top: 1px solid var(--border);
@@ -234,6 +258,23 @@ footer {
 
 footer a {
   color: var(--muted);
+}
+
+#theme-toggle {
+  background: none;
+  border: 0;
+  color: var(--muted);
+  padding: 0;
+  font-size: inherit;
+  text-decoration: underline;
+  text-underline-offset: 0.18em;
+  box-shadow: none;
+}
+
+#theme-toggle:hover {
+  background: none;
+  border: 0;
+  color: var(--accent);
 }
 
 .actions {

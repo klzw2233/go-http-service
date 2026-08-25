@@ -25,6 +25,7 @@ func TestAuthorLogin_IsHTMLShellWithoutCookie(t *testing.T) {
 	body := w.Body.String()
 	assert.Contains(t, body, `id="login-form"`)
 	assert.Contains(t, body, `/author/app.js`)
+	assert.Contains(t, body, `id="theme-toggle"`)
 	assert.NotContains(t, body, secretDraftBody)
 }
 
@@ -88,6 +89,23 @@ func TestSiteCSS_Served(t *testing.T) {
 	body := w.Body.String()
 	assert.Contains(t, body, "prefers-color-scheme")
 	assert.Contains(t, body, "--bg")
+	assert.Contains(t, body, `data-theme`)
+	assert.NotContains(t, body, secretDraftBody)
+}
+
+func TestThemeJS_Served(t *testing.T) {
+	t.Parallel()
+
+	w := request{method: http.MethodGet, path: "/theme.js"}.
+		doOn(t, routerWithPosts(t, &stubPostService{}))
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Header().Get("Content-Type"), "javascript")
+	assert.Equal(t, "no-store", w.Header().Get("Cache-Control"))
+	body := w.Body.String()
+	assert.Contains(t, body, "localStorage")
+	assert.Contains(t, body, "data-theme")
+	assert.NotContains(t, body, "access_token")
 	assert.NotContains(t, body, secretDraftBody)
 }
 
@@ -101,6 +119,8 @@ func TestHome_LinksStylesheet(t *testing.T) {
 	body := w.Body.String()
 	assert.Contains(t, body, `href="/site.css"`)
 	assert.Contains(t, body, `name="viewport"`)
+	assert.Contains(t, body, `src="/theme.js"`)
+	assert.Contains(t, body, `id="theme-toggle"`)
 }
 
 func TestAuthorJS_ContainsBearerUsage(t *testing.T) {
