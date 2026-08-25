@@ -1,0 +1,5 @@
+# Agent Drafts are a client convention, not a second Author
+
+An Agent writes Posts through the same JSON API the Author's browser uses. It is not a User and not a second Author. It logs in with the Author password from the environment (never from the prompt). The process does not distinguish callers: any Author token may Publish. "Drafts only" is a skill convention until a scoped, revocable token exists. A `#N ` prefix on the Title is the same kind of convention: the Agent reads existing Titles, takes max N, and writes the next label. The server does not store a number column for this and does not unique-check the prefix.
+
+A second User, a `role` column, or turning off `POST /api/posts/:slug/publish` would have broken the Author area or reopened the permission model ADR-0001 and ADR-0003 refused. A personal access token with a draft scope is the later upgrade, when the write API is on the public internet, a half-finished Publish actually happens, or a second non-browser client starts overwriting Drafts.

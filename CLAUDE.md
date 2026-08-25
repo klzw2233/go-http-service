@@ -2,7 +2,7 @@
 
 > 文件位置：`go-http-service/CLAUDE.md`
 > 用途：告知 Claude Code 本项目的运行环境、约定与注意事项
-> 最后更新：2026-08-25（本地 `go run` 示例带 DEV_AUTHOR_PASSWORD）
+> 最后更新：2026-08-26（Agent 写 Draft / 拉 Post 的仓库 skill）
 
 ---
 
@@ -454,3 +454,11 @@ Default five roles, label string equals the role name. See `docs/agents/triage-l
 ### Domain docs
 
 Single-context: root `CONTEXT.md` and `docs/adr/`. See `docs/agents/domain.md`.
+
+### write-blog-draft
+
+Create or replace a Draft via the Author JSON API. Slug comes from the human; `#N ` on Title is a client label. See `.claude/skills/write-blog-draft/SKILL.md`.
+
+### pull-blog-posts
+
+One-way copy of Posts to gitignored `notes/blog/{slug}.md`. See `.claude/skills/pull-blog-posts/SKILL.md`.

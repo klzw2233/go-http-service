@@ -12,13 +12,17 @@ _Avoid_: account, member, customer
 The User who writes Posts. This blog has one author; the public does not write.
 _Avoid_: admin, editor, writer
 
+**Agent**:
+A program that writes Posts through the Author's JSON API. It is not a User and not a second Author. It creates Drafts and edits Draft Bodies; it does not Publish, Unpublish, or change a Published Post. The Author still chooses the Slug.
+_Avoid_: bot, copilot, assistant, note-taker
+
 **Post**:
-A piece of writing with a Title, a Slug, and a Body. The unit a reader opens and the author edits.
-_Avoid_: article, page, blog, content, entry
+A piece of writing with a Title, a Slug, and a Body. The unit a reader opens and the author edits. Writing sent from a local editor or an Agent is still a Post, not a second kind of document.
+_Avoid_: article, page, blog, content, entry, note, notebook
 
 **Title**:
-The human-readable heading of a Post. It is not unique, it may change, and it is not the public name.
-_Avoid_: name, headline, slug
+The human-readable heading of a Post. It is not unique, it may change, and it is not the public name. An Agent may prefix it with `#N ` (a label, not an order and not the id). The server does not assign or unique-check that prefix.
+_Avoid_: name, headline, slug, number, id
 
 **Body**:
 The Markdown source of a Post. It is not HTML. Raw HTML in the source is shown as text.

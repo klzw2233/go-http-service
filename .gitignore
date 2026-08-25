@@ -31,6 +31,9 @@ go.work.sum
 .env
 .env.local
 
+# One-way local copies of Posts (pull-blog-posts). Server is the source of truth.
+notes/blog/
+
 # OS generated files
 .DS_Store
 Thumbs.db
