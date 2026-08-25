@@ -143,19 +143,23 @@ cd ~/workspace/go-http-service
 
 ### 2. 运行服务
 
-`DATABASE_URL`、`JWT_SECRET` 和 `AUTHOR_USERNAME` 都是必需项，未设置进程会拒绝启动：
+`DATABASE_URL`、`JWT_SECRET` 和 `AUTHOR_USERNAME` 都是必需项，未设置进程会拒绝启动。本地要打开 `/author/login` 时再加上 `DEV_AUTHOR_PASSWORD`：空库第一次启动会插入 Author，之后用这个口令登录。已经存在的账号不会被改密码。生产环境不要设这个变量。
 
 ```bash
 DATABASE_URL="postgres://app:devsecret@127.0.0.1:5433/go_http_service?sslmode=disable" \
 JWT_SECRET="$(openssl rand -base64 48)" \
 AUTHOR_USERNAME=jimmy \
+DEV_AUTHOR_PASSWORD=correct-horse \
   go run cmd/server/main.go
 ```
+
+浏览器打开 `http://localhost:8080/author/login`，用户名 `jimmy`，密码 `correct-horse`。
 
 默认监听 `8080`。需要换端口时通过 `PORT` 环境变量指定，无需重新编译：
 
 ```bash
-PORT=9000 DATABASE_URL="..." JWT_SECRET="..." AUTHOR_USERNAME=jimmy go run cmd/server/main.go
+PORT=9000 DATABASE_URL="..." JWT_SECRET="..." AUTHOR_USERNAME=jimmy \
+DEV_AUTHOR_PASSWORD=correct-horse go run cmd/server/main.go
 ```
 
 服务收到 `Ctrl+C`（SIGINT）或 `SIGTERM` 时会优雅关闭：停止接收新连接，
@@ -233,7 +237,7 @@ curl -X POST http://localhost:8080/api/echo \
 
 公开注册已关闭。未认证的 `POST /api/users` 返回 `403` + `FORBIDDEN`，不是 `401`：这是权限拒绝，不是提示去登录。
 
-本地 compose：在 `.env` 里设 `DEV_AUTHOR_PASSWORD`（见 `.env.example`）。进程第一次启动时，若 `users` 里还没有 `AUTHOR_USERNAME`，会用 bcrypt 插入该用户。已经存在则不动密码。生产环境不要设这个变量。
+本地：`go run` 加上面的 `DEV_AUTHOR_PASSWORD`，或 compose 在 `.env` 里设同一变量（见 `.env.example`）。进程第一次启动时，若 `users` 里还没有 `AUTHOR_USERNAME`，会用 bcrypt 插入该用户。已经存在则不动密码。生产环境不要设这个变量。
 
 也仍可用 SQL 自己插（bcrypt 哈希，不是明文）。`AUTHOR_USERNAME` 必须与 `username` 大小写不敏感地一致。已登录的 Author 仍可 `POST /api/users` 再建账号；已登录但不是 Author 的用户同样是 `403`。
 
