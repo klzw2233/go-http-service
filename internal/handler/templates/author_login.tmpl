@@ -2,17 +2,24 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sign in · {{.SiteName}}</title>
+<script>try{var t=localStorage.getItem("theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)}catch(e){}</script>
+<link rel="stylesheet" href="/site.css">
 </head>
 <body>
 <h1>Sign in</h1>
 <form id="login-form">
 <label>Username <input name="username" autocomplete="username" required></label>
 <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
-<button type="submit">Sign in</button>
+<p class="actions"><button type="submit">Sign in</button></p>
 </form>
 <p id="error" hidden></p>
-<p><a href="/">{{.SiteName}}</a></p>
+<footer>
+<a href="/">{{.SiteName}}</a>
+<button type="button" id="theme-toggle">Theme</button>
+</footer>
+<script src="/theme.js"></script>
 <script src="/author/app.js"></script>
 </body>
 </html>

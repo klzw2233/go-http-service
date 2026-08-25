@@ -2,23 +2,32 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{if eq .Mode "new"}}New post{{else}}Edit{{end}} · {{.SiteName}}</title>
+<script>try{var t=localStorage.getItem("theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)}catch(e){}</script>
+<link rel="stylesheet" href="/site.css">
 </head>
 <body data-mode="{{.Mode}}">
 <h1>{{if eq .Mode "new"}}New post{{else}}Edit{{end}}</h1>
-<p><a href="/author/posts">All posts</a> · <button type="button" id="logout">Sign out</button></p>
+<p class="actions"><a href="/author/posts">All posts</a> <button type="button" id="logout">Sign out</button></p>
 <form id="edit-form">
 <label>Title <input id="title" name="title" required></label>
 <label>Slug <input id="slug" name="slug" {{if eq .Mode "edit"}}readonly{{end}} required></label>
 <label>Body <textarea id="body" name="body" rows="16" required></textarea></label>
+<p class="actions">
 <button type="submit">Save</button>
 <button type="button" id="preview-btn">Preview</button>
 <button type="button" id="publish-btn">Publish</button>
 <button type="button" id="unpublish-btn">Unpublish</button>
+</p>
 </form>
 <div id="preview"></div>
 <p id="error" hidden></p>
-<p><a href="/">{{.SiteName}}</a></p>
+<footer>
+<a href="/">{{.SiteName}}</a>
+<button type="button" id="theme-toggle">Theme</button>
+</footer>
+<script src="/theme.js"></script>
 <script src="/author/app.js"></script>
 </body>
 </html>
