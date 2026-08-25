@@ -21,6 +21,16 @@ Same as `write-blog-draft`. Environment only; never echo secrets.
 
 Login once per session. Do not login per Post.
 
+Prefer the tracked script (creates `notes/blog/` if needed, overwrites `{slug}.md`):
+
+```bash
+./notes/blog/pull-blog-posts.sh
+# or one Post:
+./notes/blog/pull-blog-posts.sh hello-homelab
+```
+
+If you must do it inline:
+
 ```bash
 base="${BLOG_BASE_URL:-http://127.0.0.1:8080}"
 resp="$(curl -sS -X POST "$base/api/auth/login" \

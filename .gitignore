@@ -32,7 +32,8 @@ go.work.sum
 .env.local
 
 # One-way local copies of Posts (pull-blog-posts). Server is the source of truth.
-notes/blog/
+# Keep the pull script tracked; ignore the Markdown copies.
+notes/blog/*.md
 
 # OS generated files
 .DS_Store
