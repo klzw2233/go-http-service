@@ -85,6 +85,14 @@ func run() error {
 	userRepo := repository.NewUserRepository(pool)
 	users := service.NewUserService(userRepo)
 
+	if cfg.DevAuthorPassword != "" {
+		created, err := users.EnsureAuthor(ctx, cfg.AuthorUsername, cfg.DevAuthorPassword)
+		if err != nil {
+			return fmt.Errorf("ensure author: %w", err)
+		}
+		logger.Info("author account ready", "username", created.Username, "id", created.ID)
+	}
+
 	tokens, err := auth.NewTokenIssuer(cfg.JWTSecret, cfg.AccessTokenTTL)
 	if err != nil {
 		return fmt.Errorf("token issuer: %w", err)

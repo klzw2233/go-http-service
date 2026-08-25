@@ -226,17 +226,13 @@ curl -X POST http://localhost:8080/api/echo \
 {"message":"hello","echoed_at":"..."}
 ```
 
-#### 第一个 Author 账号（运维插入）
+#### 第一个 Author 账号
 
-公开注册已关闭。未认证的 `POST /api/users` 返回 `403` + `FORBIDDEN`，不是 `401`：这是权限拒绝，不是提示去登录。第一个 Author 由运维直接插入 `users` 表（bcrypt 哈希，不是明文）：
+公开注册已关闭。未认证的 `POST /api/users` 返回 `403` + `FORBIDDEN`，不是 `401`：这是权限拒绝，不是提示去登录。
 
-```bash
-# 生成哈希后插入。cost 用默认 10 即可。
-HASH="$(python -c 'import bcrypt; print(bcrypt.hashpw(b"correct-horse", bcrypt.gensalt()).decode())')"
-psql "$DATABASE_URL" -c "INSERT INTO users (username, email, password_hash) VALUES ('jimmy', 'jimmy@example.com', '$HASH')"
-```
+本地 compose：在 `.env` 里设 `DEV_AUTHOR_PASSWORD`（见 `.env.example`）。进程第一次启动时，若 `users` 里还没有 `AUTHOR_USERNAME`，会用 bcrypt 插入该用户。已经存在则不动密码。生产环境不要设这个变量。
 
-`AUTHOR_USERNAME` 必须与这行的 `username` 大小写不敏感地一致（唯一索引建在 `lower(username)` 上）。插好之后用登录接口换 token。已登录的 Author 仍可 `POST /api/users` 再建账号（运维便利）；已登录但不是 Author 的用户同样是 `403`。
+也仍可用 SQL 自己插（bcrypt 哈希，不是明文）。`AUTHOR_USERNAME` 必须与 `username` 大小写不敏感地一致。已登录的 Author 仍可 `POST /api/users` 再建账号；已登录但不是 Author 的用户同样是 `403`。
 
 **响应里没有任何密码字段**，连 `password_hash` 也没有。见下文「密码处理」。
 
@@ -323,11 +319,10 @@ go build -ldflags "-X go-http-service/internal/model.Version=$(git describe --ta
 `gcr.io/distroless/static-debian12:nonroot`，镜像 ~10MB、无 shell、非 root 运行。
 
 ```bash
-# JWT_SECRET 与 AUTHOR_USERNAME 都是必需项，从宿主机环境变量读，不写进 compose 文件
-export JWT_SECRET="$(openssl rand -base64 48)"
-export AUTHOR_USERNAME=jimmy
+# 复制示例环境文件，按需改 JWT_SECRET / AUTHOR_USERNAME / DEV_AUTHOR_PASSWORD
+cp .env.example .env
 
-# --wait 会等到 db 的 healthcheck 通过
+# --wait 会等到 db 的 healthcheck 通过。Compose 自动读 .env
 docker compose up -d --wait
 
 curl http://localhost:8080/api/health          # 存活
@@ -742,6 +737,7 @@ server stopped with an error  error="config: PORT must be a number, got \"abc\""
 | `DB_CONNECT_TIMEOUT` | `5s` | 建连超时，同时用作就绪探测的超时 |
 | `JWT_SECRET` | **必需**，至少 32 字节 | HS256 签名密钥，启动日志脱敏为 `(set)` |
 | `AUTHOR_USERNAME` | **必需**，3–32 位字母数字 | 可写 Posts 的 User 名，大小写不敏感；启动日志原样写出（不是密钥） |
+| `DEV_AUTHOR_PASSWORD` | 空 | 可选。设置后首次启动若该 Author 不存在则 bcrypt 插入；已存在则跳过。生产不要设。启动日志脱敏 |
 | `ACCESS_TOKEN_TTL` | `15m` | access token 有效期 |
 | `REFRESH_TOKEN_TTL` | `720h` | refresh token 有效期（30 天） |
 | `RATE_LIMIT_RPS` | `20` | 全局限流（探针除外），每地址每秒 |

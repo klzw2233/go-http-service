@@ -1,9 +1,9 @@
 # App + PostgreSQL, one command to bring up the full stack.
 #
 # Usage:
-#   export JWT_SECRET="$(openssl rand -base64 48)"
-#   export AUTHOR_USERNAME=jimmy
-#   docker compose up -d --wait     # start and wait for healthchecks
+#   cp .env.example .env            # then edit JWT_SECRET
+#   docker compose up -d --wait     # reads .env for JWT_SECRET / AUTHOR_USERNAME
+#   # optional: DEV_AUTHOR_PASSWORD in .env creates the Author User on first boot
 #   curl http://localhost:8080/api/health
 #   docker compose down -v           # stop and drop the volume
 #
@@ -59,6 +59,10 @@ services:
       # the process refuses to start without an Author. The first User is
       # an operator SQL insert — this value only names who that is.
       AUTHOR_USERNAME: "${AUTHOR_USERNAME:?AUTHOR_USERNAME must be set; it names the User who may write Posts}"
+      # Optional. When set, the first boot inserts AUTHOR_USERNAME if missing.
+      # Compose interpolates empty as unset; default to empty so production
+      # compose files without this key still start.
+      DEV_AUTHOR_PASSWORD: "${DEV_AUTHOR_PASSWORD:-}"
     # Start the app only once the database reports healthy, so the app's first
     # connection attempt is not racing the database's startup.
     depends_on:

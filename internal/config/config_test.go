@@ -25,7 +25,7 @@ var envVars = []string{
 	"RATE_LIMIT_RPS", "RATE_LIMIT_BURST",
 	"LOGIN_RATE_LIMIT_RPM", "LOGIN_RATE_LIMIT_BURST",
 	"JWT_SECRET", "ACCESS_TOKEN_TTL", "REFRESH_TOKEN_TTL",
-	"AUTHOR_USERNAME",
+	"AUTHOR_USERNAME", "DEV_AUTHOR_PASSWORD",
 }
 
 // testDSN is a syntactically valid connection string. It is seeded by
@@ -295,6 +295,11 @@ func TestLoad_InvalidValues(t *testing.T) {
 			name:    "Author 用户名含非字母数字",
 			env:     map[string]string{"AUTHOR_USERNAME": "jim my"},
 			wantErr: "AUTHOR_USERNAME must be 3-32 alphanumeric characters",
+		},
+		{
+			name:    "开发 Author 密码过短",
+			env:     map[string]string{"DEV_AUTHOR_PASSWORD": "short"},
+			wantErr: "DEV_AUTHOR_PASSWORD must be at least 8 bytes",
 		},
 	}
 
