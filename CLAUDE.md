@@ -2,7 +2,7 @@
 
 > 文件位置：`go-http-service/CLAUDE.md`
 > 用途：告知 Claude Code 本项目的运行环境、约定与注意事项
-> 最后更新：2026-08-25（#2：AUTHOR_USERNAME 必需，公开注册关闭）
+> 最后更新：2026-08-25（本地 `go run` 示例带 DEV_AUTHOR_PASSWORD）
 
 ---
 
@@ -25,13 +25,16 @@ PowerShell 兼容性。旧版本本文件描述的 `E:\Program Files\...` 路径
 
 ```bash
 # 运行服务（DATABASE_URL、JWT_SECRET、AUTHOR_USERNAME 都是必需项）
+# DEV_AUTHOR_PASSWORD 可选：空库时插入 Author，用来打开 /author/login
 DATABASE_URL="postgres://app:devsecret@127.0.0.1:5433/go_http_service?sslmode=disable" \
 JWT_SECRET="$(openssl rand -base64 48)" \
 AUTHOR_USERNAME=jimmy \
+DEV_AUTHOR_PASSWORD=correct-horse \
   go run cmd/server/main.go
 
 # 换端口
-PORT=9000 DATABASE_URL="..." JWT_SECRET="..." AUTHOR_USERNAME=jimmy go run cmd/server/main.go
+PORT=9000 DATABASE_URL="..." JWT_SECRET="..." AUTHOR_USERNAME=jimmy \
+DEV_AUTHOR_PASSWORD=correct-horse go run cmd/server/main.go
 
 # 构建
 go build -o server ./cmd/server
@@ -76,10 +79,11 @@ docker run -d --name go-http-service-db \
 docker start go-http-service-db     # 之后只需启停
 docker stop  go-http-service-db
 
-# 带数据库运行
+# 带数据库运行（要登录 Author 区时加上 DEV_AUTHOR_PASSWORD）
 DATABASE_URL="postgres://app:devsecret@127.0.0.1:5433/go_http_service?sslmode=disable" \
 JWT_SECRET="$(openssl rand -base64 48)" \
 AUTHOR_USERNAME=jimmy \
+DEV_AUTHOR_PASSWORD=correct-horse \
   go run cmd/server/main.go
 
 # 跑需要数据库的测试（不设置这个变量则相关测试自动跳过）
