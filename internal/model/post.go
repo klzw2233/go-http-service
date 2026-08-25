@@ -70,6 +70,16 @@ type UpdatePostRequest struct {
 	Slug  string  `json:"slug"`
 }
 
+// PreviewPostRequest is the body of POST /api/posts/preview.
+type PreviewPostRequest struct {
+	Body string `json:"body"`
+}
+
+// PreviewPostResponse is goldmark output for the in-editor Preview.
+type PreviewPostResponse struct {
+	HTML string `json:"html"`
+}
+
 // PostResponse is what a client receives for a Post. It exposes the Draft
 // state as `draft` (the negation of the stored `published`) so the Author
 // area can mark unfinished writing without inverting a bool in the caller.
