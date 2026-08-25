@@ -37,8 +37,7 @@ PORT=9000 DATABASE_URL="..." JWT_SECRET="..." AUTHOR_USERNAME=jimmy go run cmd/s
 go build -o server ./cmd/server
 
 # Docker Compose 一键起 app + 数据库（镜像多阶段构建，distroless 终态）
-export JWT_SECRET="$(openssl rand -base64 48)"
-export AUTHOR_USERNAME=jimmy
+cp .env.example .env                 # 填 JWT_SECRET；DEV_AUTHOR_PASSWORD 可自动建 Author
 docker compose up -d --wait          # 起服务并等 db healthcheck 过
 docker compose down -v               # 停并删数据卷（去掉 -v 保留数据）
 # 单独构建镜像不走 compose：
@@ -269,6 +268,7 @@ refresh token 和密码都是凭据，都不能明文入库。但 refresh token 
 | `DATABASE_URL` | **必需** | PostgreSQL 连接串 |
 | `JWT_SECRET` | **必需**，≥32 字节 | HS256 密钥，必须在 `LogValue()` 脱敏 |
 | `AUTHOR_USERNAME` | **必需**，3–32 字母数字 | 可写 Posts 的 User 名；不是密钥，`LogValue()` 原样写出 |
+| `DEV_AUTHOR_PASSWORD` | 空 | 可选开发引导：空库时插入 Author。`LogValue()` 脱敏 |
 | `ACCESS_TOKEN_TTL` / `REFRESH_TOKEN_TTL` | `15m` / `720h` | token 有效期 |
 | `LOG_LEVEL` / `LOG_FORMAT` | `info` / `json` | 日志级别与格式 |
 

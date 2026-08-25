@@ -33,6 +33,7 @@ var (
 // testable without a database.
 type userStore interface {
 	Create(ctx context.Context, u *model.User) error
+	FindByUsername(ctx context.Context, username string) (*model.User, error)
 }
 
 // UserService implements account operations.
@@ -103,6 +104,25 @@ func (s *UserService) Register(ctx context.Context, in RegisterInput) (*model.Us
 	}
 
 	return user, nil
+}
+
+// EnsureAuthor creates the named Author if that username is not already
+// in the database. It is for local compose: set DEV_AUTHOR_PASSWORD and
+// the first boot inserts the row. An existing account is left alone, so
+// a later start cannot reset the password.
+func (s *UserService) EnsureAuthor(ctx context.Context, username, password string) (*model.User, error) {
+	existing, err := s.users.FindByUsername(ctx, username)
+	if err == nil {
+		return existing, nil
+	}
+	if !errors.Is(err, repository.ErrUserNotFound) {
+		return nil, fmt.Errorf("look up author: %w", err)
+	}
+	return s.Register(ctx, RegisterInput{
+		Username: username,
+		Email:    username + "@localhost",
+		Password: password,
+	})
 }
 
 // translateCreateError lifts repository errors into this layer's own.

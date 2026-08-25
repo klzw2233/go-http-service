@@ -172,6 +172,13 @@ type Config struct {
 	// the unique index on lower(username). It is a name, not a secret.
 	AuthorUsername string
 
+	// DevAuthorPassword, when set, lets startup create the Author User
+	// if that username is not already in the database. Env: DEV_AUTHOR_PASSWORD.
+	//
+	// Optional. Leave empty in production. LogValue redacts it. An
+	// existing account is never overwritten.
+	DevAuthorPassword string
+
 	// LogLevel is the minimum level to emit. Env: LOG_LEVEL.
 	LogLevel slog.Level
 
@@ -202,6 +209,7 @@ func Load() (*Config, error) {
 		DatabaseURL:        envString("DATABASE_URL", ""),
 		JWTSecret:          envString("JWT_SECRET", ""),
 		AuthorUsername:     envString("AUTHOR_USERNAME", ""),
+		DevAuthorPassword:  envString("DEV_AUTHOR_PASSWORD", ""),
 	}
 
 	var err error
@@ -346,6 +354,17 @@ func (c *Config) validate() []error {
 			c.AuthorUsername))
 	}
 
+	if c.DevAuthorPassword != "" {
+		n := len(c.DevAuthorPassword)
+		if n < 8 {
+			errs = append(errs, fmt.Errorf(
+				"DEV_AUTHOR_PASSWORD must be at least 8 bytes when set, got %d", n))
+		} else if n > 72 {
+			errs = append(errs, fmt.Errorf(
+				"DEV_AUTHOR_PASSWORD must be at most 72 bytes, got %d", n))
+		}
+	}
+
 	return errs
 }
 
@@ -386,6 +405,7 @@ func (c *Config) LogValue() slog.Value {
 		slog.String("access_token_ttl", c.AccessTokenTTL.String()),
 		slog.String("refresh_token_ttl", c.RefreshTokenTTL.String()),
 		slog.String("author_username", c.AuthorUsername),
+		slog.String("dev_author_password", redactSecret(c.DevAuthorPassword)),
 		slog.String("log_level", c.LogLevel.String()),
 		slog.String("log_format", c.LogFormat),
 	)

@@ -1196,7 +1196,7 @@ func envWith(overrides map[string]string) []string {
 		"RATE_LIMIT_RPS", "RATE_LIMIT_BURST",
 		"LOGIN_RATE_LIMIT_RPM", "LOGIN_RATE_LIMIT_BURST",
 		"JWT_SECRET", "ACCESS_TOKEN_TTL", "REFRESH_TOKEN_TTL",
-		"AUTHOR_USERNAME",
+		"AUTHOR_USERNAME", "DEV_AUTHOR_PASSWORD",
 	}
 
 	drop := make(map[string]bool, len(managed))

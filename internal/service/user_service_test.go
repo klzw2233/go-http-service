@@ -35,6 +35,13 @@ func (s *stubStore) Create(ctx context.Context, u *model.User) error {
 	return nil
 }
 
+func (s *stubStore) FindByUsername(ctx context.Context, username string) (*model.User, error) {
+	if s.created != nil && s.created.Username == username {
+		return s.created, nil
+	}
+	return nil, repository.ErrUserNotFound
+}
+
 // newTestService uses the cheapest bcrypt cost. The default takes about
 // 60ms per hash by design; across this file that would be seconds, and
 // worse under -race.
@@ -173,4 +180,30 @@ func TestNewUserService_DefaultsToStandardCost(t *testing.T) {
 
 	assert.Equal(t, bcrypt.DefaultCost, NewUserService(&stubStore{}).cost,
 		"生产默认必须是 DefaultCost，MinCost 只该出现在测试里")
+}
+
+func TestEnsureAuthor_CreatesWhenMissing(t *testing.T) {
+	t.Parallel()
+
+	store := &stubStore{}
+	user, err := newTestService(store).EnsureAuthor(t.Context(), "jimmy", "correct-horse")
+	require.NoError(t, err)
+	require.NotNil(t, user)
+	assert.Equal(t, "jimmy", user.Username)
+	assert.Equal(t, 1, store.calls)
+}
+
+func TestEnsureAuthor_SkipsWhenPresent(t *testing.T) {
+	t.Parallel()
+
+	store := &stubStore{}
+	svc := newTestService(store)
+	_, err := svc.Register(t.Context(), validInput())
+	require.NoError(t, err)
+	store.calls = 0
+
+	user, err := svc.EnsureAuthor(t.Context(), "jimmy", "other-password-xx")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), user.ID)
+	assert.Zero(t, store.calls, "已有 Author 时不得再 Create")
 }
