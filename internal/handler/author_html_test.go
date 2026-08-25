@@ -86,6 +86,7 @@ func TestAuthorJS_ContainsBearerUsage(t *testing.T) {
 	assert.Contains(t, w.Header().Get("Content-Type"), "javascript")
 	assert.Contains(t, w.Body.String(), "Authorization")
 	assert.Contains(t, w.Body.String(), "sessionStorage")
+	assert.Contains(t, w.Body.String(), "afterLoginPath")
 	assert.NotContains(t, w.Body.String(), secretDraftBody)
 }
 
@@ -97,7 +98,7 @@ func TestHome_FooterLinkToAuthorLogin(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, w.Code)
 	body := w.Body.String()
-	assert.Contains(t, body, `href="/author/login"`)
+	assert.Contains(t, body, `href="/author/posts"`)
 	assert.Contains(t, body, "<h1>"+model.SiteName+"</h1>")
 }
 
