@@ -2,7 +2,7 @@
 
 > 文件位置：`go-http-service/CLAUDE.md`
 > 用途：告知 Claude Code 本项目的运行环境、约定与注意事项
-> 最后更新：2026-08-27（认证后续：sessionStorage / TOTP / 脚本 refresh / 撤全部 / 登录失败日志）
+> 最后更新：2026-08-27（ADR 0021：Author SPA 是第二种客户端，公开 HTML 仍由 Go 渲染）
 
 ---
 
@@ -389,6 +389,9 @@ CORS 默认 fail-closed：`CORS_ALLOWED_ORIGINS` 留空时不回任何 `Access-C
 10. 认证后续（已决定、尚未写代码）：`login_failed` 专用日志 + 撤全部 refresh
     （密码 step-up，Author 区按钮）。公网上线前再做 TOTP + 备份码。
     不做：跨标签同步、PAT、Passkey、机器人挑战、access 黑名单。见 ADR 0016–0020。
+11. 若加独立 Author SPA：只配 `CORS_ALLOWED_ORIGINS`（精确 origin，不要 `*`），
+    调现有 JSON，Preview 仍走服务端。不开放公开 JSON，不删 Go 的 `/` 与
+    `/posts/{slug}`。见 ADR 0021。
 
 ### 步骤 C 已落地的规矩（后续直接沿用）
 
@@ -402,7 +405,8 @@ CORS 默认 fail-closed：`CORS_ALLOWED_ORIGINS` 留空时不回任何 `Access-C
 ### 步骤 D 已落地的规矩（后续直接沿用）
 
 - **CORS fail-closed**：`CORS_ALLOWED_ORIGINS` 留空时不回任何 `Access-Control-*`，
-  浏览器拒绝全部跨域。不要为了方便把默认改成 `*`
+  浏览器拒绝全部跨域。不要为了方便把默认改成 `*`。独立 Author SPA 只把该
+  origin 写进这个变量（ADR 0021），不要改中间件、不要给 localhost 开后门
 - CORS 按 origin **精确字符串匹配**，不做子串匹配；被命中的来源原样回显为
   `Access-Control-Allow-Origin`（非通配符），配合 `Allow-Credentials: true`
   让凭据类请求可用。`*` 仍是合法的显式「全部放开」选项
