@@ -441,6 +441,7 @@ Kubernetes 暂缓。当前方向是个人博客，不是编排演练。
 
 | 笔记 | 内容 |
 |------|------|
+| `go-framework-guides.md` | Gin 在 Go 框架版图里站哪一层；Echo/Chi/Fiber/Kratos/go-zero 等对照；为什么不是 go-spring |
 | `在现有HomeLab框架上学习后端开发.md` | Win10 → nginx HTTPS → Ubuntu 上的 Go |
 | `Win10与Ubuntu开发环境选择.md` | 为什么主开发在 Ubuntu |
 | `VS Code Remote SSH 配置教程.md` | 日常编辑方式 |
@@ -477,6 +478,10 @@ Kubernetes 暂缓。当前方向是个人博客，不是编排演练。
 **想改博客行为（slug、发布、预览、样式）**
 
 `CONTEXT.md` → 相关 ADR（0004–0015）→ `internal/handler/blog.go` / `author_html.go` / `post.go`。不要从「给 Draft 一个预览 URL」或「公开 JSON feed」开始，那两件已经被拒绝过。
+
+**想理解「为什么是 Gin、要不要换框架」**
+
+`notes/go-framework-guides.md` → 本总纲第 3、4 节（分层和手工装配）→ `cmd/server/main.go`。结论先说：Gin 只是 HTTP 层；IoC / 微服务套件是另一层，这个体量用不上。
 
 **想加一个新 JSON 接口**
 
