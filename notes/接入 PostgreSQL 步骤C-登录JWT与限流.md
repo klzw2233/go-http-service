@@ -182,3 +182,67 @@ access token 短寿命是故意的：它一旦签发就无法撤销，寿命就�
 - 时间用注入的时钟，测试不 sleep
 - 改已提交的迁移文件是禁止的；新表就是加 `0002_*.sql`
 - `ON DELETE CASCADE`：删用户时自动清掉他的会话
+
+---
+
+## 九、脚本用 refresh，不要另做 PAT
+
+非浏览器客户端（curl、以后的发布脚本）走同一对 token，**不要**再发明
+一种不轮转的 PAT。决定写在 `docs/adr/0018-scripts-use-a-dedicated-refresh-token.md`。
+
+规则：
+
+1. 脚本自己 `login` 一次，拿到自己的 refresh。**禁止**和浏览器、另一条脚本
+   共用同一条——两个持有者轮转同一条，第二次就是重放，`TryRotate` 会撤掉
+   该 User 的全部会话。
+2. 每次 `refresh` 都必须把**新的** refresh 写回文件。旧的立刻作废。
+3. refresh 不再要 TOTP（公网上线后 TOTP 只挡密码登录）。文件泄露 = Author
+   权，直到过期或「撤全部会话」。
+
+一次性换票（密码不要进仓库，用环境变量）：
+
+```bash
+curl -sS -X POST http://127.0.0.1:8080/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d "{\"username\":\"${AUTHOR_USERNAME}\",\"password\":\"${AUTHOR_PASSWORD}\"}" \
+  > /tmp/author-tokens.json
+```
+
+之后每次调用前轮转，并覆盖文件：
+
+```bash
+curl -sS -X POST http://127.0.0.1:8080/api/auth/refresh \
+  -H 'Content-Type: application/json' \
+  -d "{\"refresh_token\":\"$(jq -r .refresh_token /tmp/author-tokens.json)\"}" \
+  > /tmp/author-tokens.json.new
+mv /tmp/author-tokens.json.new /tmp/author-tokens.json
+```
+
+写接口带 access：
+
+```bash
+curl -sS -X POST http://127.0.0.1:8080/api/posts \
+  -H "Authorization: Bearer $(jq -r .access_token /tmp/author-tokens.json)" \
+  -H 'Content-Type: application/json' \
+  -d '{"slug":"hello","title":"Hello","body":"Hi."}'
+```
+
+登出只撤这一条（脚本退出时）：
+
+```bash
+curl -sS -X POST http://127.0.0.1:8080/api/auth/logout \
+  -H 'Content-Type: application/json' \
+  -d "{\"refresh_token\":\"$(jq -r .refresh_token /tmp/author-tokens.json)\"}"
+rm -f /tmp/author-tokens.json
+```
+
+「被盗了，踢掉所有设备」还没有 HTTP API。Homelab 应急可以 SSH 进库：
+
+```sql
+UPDATE refresh_tokens SET revoked_at = now()
+WHERE user_id = (SELECT id FROM users WHERE username = 'jimmy')
+  AND revoked_at IS NULL;
+```
+
+已发出的 access 最多再活 `ACCESS_TOKEN_TTL`（默认 15 分钟），没有黑名单。
+相关决定：ADR 0017（TOTP 不挡 refresh）、0019（将来的撤全部要再输密码）。
